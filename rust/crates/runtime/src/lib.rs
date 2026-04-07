@@ -47,6 +47,8 @@ pub mod stale_branch;
 pub mod summary_compression;
 pub mod task_packet;
 pub mod task_registry;
+pub mod task_registry_backend;
+pub mod dolt_task_registry_backend;
 pub mod team_cron_registry;
 #[cfg(test)]
 mod trust_resolver;
@@ -163,7 +165,9 @@ pub use stale_branch::{
     apply_policy, check_freshness, BranchFreshness, StaleBranchAction, StaleBranchEvent,
     StaleBranchPolicy,
 };
+pub use dolt_task_registry_backend::DoltTaskRegistryBackend;
 pub use task_packet::{validate_packet, TaskPacket, TaskPacketValidationError, ValidatedPacket};
+pub use task_registry_backend::{TaskRegistryBackend, TaskRegistryError};
 #[cfg(test)]
 pub use trust_resolver::{TrustConfig, TrustDecision, TrustEvent, TrustPolicy, TrustResolver};
 pub use usage::{

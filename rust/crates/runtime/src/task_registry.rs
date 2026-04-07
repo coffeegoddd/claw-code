@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::task_registry_backend::{TaskRegistryBackend, TaskRegistryError};
 use crate::{validate_packet, TaskPacket, TaskPacketValidationError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +228,56 @@ impl TaskRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl TaskRegistryBackend for TaskRegistry {
+    fn create(&self, prompt: &str, description: Option<&str>) -> Result<Task, TaskRegistryError> {
+        Ok(TaskRegistry::create(self, prompt, description))
+    }
+
+    fn create_from_packet(&self, packet: TaskPacket) -> Result<Task, TaskRegistryError> {
+        TaskRegistry::create_from_packet(self, packet).map_err(TaskRegistryError::from)
+    }
+
+    fn get(&self, task_id: &str) -> Result<Option<Task>, TaskRegistryError> {
+        Ok(TaskRegistry::get(self, task_id))
+    }
+
+    fn list(&self, status_filter: Option<TaskStatus>) -> Result<Vec<Task>, TaskRegistryError> {
+        Ok(TaskRegistry::list(self, status_filter))
+    }
+
+    fn stop(&self, task_id: &str) -> Result<Task, TaskRegistryError> {
+        TaskRegistry::stop(self, task_id).map_err(TaskRegistryError::Format)
+    }
+
+    fn update(&self, task_id: &str, message: &str) -> Result<Task, TaskRegistryError> {
+        TaskRegistry::update(self, task_id, message).map_err(TaskRegistryError::Format)
+    }
+
+    fn output(&self, task_id: &str) -> Result<String, TaskRegistryError> {
+        TaskRegistry::output(self, task_id).map_err(TaskRegistryError::Format)
+    }
+
+    fn append_output(&self, task_id: &str, output: &str) -> Result<(), TaskRegistryError> {
+        TaskRegistry::append_output(self, task_id, output).map_err(TaskRegistryError::Format)
+    }
+
+    fn set_status(&self, task_id: &str, status: TaskStatus) -> Result<(), TaskRegistryError> {
+        TaskRegistry::set_status(self, task_id, status).map_err(TaskRegistryError::Format)
+    }
+
+    fn assign_team(&self, task_id: &str, team_id: &str) -> Result<(), TaskRegistryError> {
+        TaskRegistry::assign_team(self, task_id, team_id).map_err(TaskRegistryError::Format)
+    }
+
+    fn remove(&self, task_id: &str) -> Result<Option<Task>, TaskRegistryError> {
+        Ok(TaskRegistry::remove(self, task_id))
+    }
+
+    fn len(&self) -> Result<usize, TaskRegistryError> {
+        Ok(TaskRegistry::len(self))
     }
 }
 
