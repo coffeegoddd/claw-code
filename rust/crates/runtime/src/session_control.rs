@@ -5,7 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::session::{Session, SessionError};
+use crate::session::{
+    ConversationMessage, Session, SessionCompaction, SessionError, SessionPromptEntry,
+};
+use crate::session_backend::{SessionBackend, SessionBackendError};
 
 /// Per-worktree session store that namespaces on-disk session files by
 /// workspace fingerprint so that parallel `opencode serve` instances never
@@ -239,6 +242,109 @@ impl SessionStore {
     }
 }
 
+impl SessionBackend for SessionStore {
+    fn create_session(
+        &self,
+        session: &Session,
+        _workspace_fingerprint: &str,
+    ) -> Result<(), SessionBackendError> {
+        let handle = self.create_handle(&session.session_id);
+        let session = session.clone().with_persistence_path(handle.path.clone());
+        session.save_to_path(&handle.path)?;
+        Ok(())
+    }
+
+    fn load_session(&self, session_id: &str) -> Result<Session, SessionBackendError> {
+        let path = self.resolve_managed_path(session_id)?;
+        let session = Session::load_from_path(&path)?;
+        Ok(session)
+    }
+
+    fn append_message(
+        &self,
+        session_id: &str,
+        message: &ConversationMessage,
+    ) -> Result<(), SessionBackendError> {
+        let path = self.resolve_managed_path(session_id)?;
+        let mut session = Session::load_from_path(&path)?;
+        session = session.with_persistence_path(&path);
+        session.push_message(message.clone())?;
+        Ok(())
+    }
+
+    fn append_prompt_entry(
+        &self,
+        session_id: &str,
+        entry: &SessionPromptEntry,
+    ) -> Result<(), SessionBackendError> {
+        let path = self.resolve_managed_path(session_id)?;
+        let mut session = Session::load_from_path(&path)?;
+        session = session.with_persistence_path(&path);
+        session.push_prompt_entry(entry.text.clone())?;
+        Ok(())
+    }
+
+    fn save_snapshot(&self, session: &Session) -> Result<(), SessionBackendError> {
+        let handle = self.create_handle(&session.session_id);
+        session.save_to_path(&handle.path)?;
+        Ok(())
+    }
+
+    fn update_compaction(
+        &self,
+        session_id: &str,
+        compaction: &SessionCompaction,
+        _remove_messages_before_ordinal: Option<u32>,
+    ) -> Result<(), SessionBackendError> {
+        let path = self.resolve_managed_path(session_id)?;
+        let mut session = Session::load_from_path(&path)?;
+        session.record_compaction(&compaction.summary, compaction.removed_message_count);
+        session.save_to_path(&path)?;
+        Ok(())
+    }
+
+    fn fork_session(
+        &self,
+        source_id: &str,
+        _new_session_id: &str,
+        branch_name: Option<&str>,
+    ) -> Result<Session, SessionBackendError> {
+        let path = self.resolve_managed_path(source_id)?;
+        let source = Session::load_from_path(&path)?;
+        let forked = source.fork(branch_name.map(ToOwned::to_owned));
+        let handle = self.create_handle(&forked.session_id);
+        let forked = forked.with_persistence_path(handle.path.clone());
+        forked.save_to_path(&handle.path)?;
+        Ok(forked)
+    }
+
+    fn list_sessions(
+        &self,
+        _workspace_fingerprint: &str,
+    ) -> Result<Vec<ManagedSessionSummary>, SessionBackendError> {
+        Ok(SessionStore::list_sessions(self)?)
+    }
+
+    fn resolve_reference(
+        &self,
+        _workspace_fingerprint: &str,
+        reference: &str,
+    ) -> Result<String, SessionBackendError> {
+        let handle = SessionStore::resolve_reference(self, reference)?;
+        Ok(handle.id)
+    }
+
+    fn session_exists(&self, session_id: &str) -> Result<bool, SessionBackendError> {
+        Ok(self.resolve_managed_path(session_id).is_ok())
+    }
+
+    fn delete_session(&self, session_id: &str) -> Result<(), SessionBackendError> {
+        let path = self.resolve_managed_path(session_id)?;
+        fs::remove_file(&path)?;
+        Ok(())
+    }
+}
+
 /// Stable hex fingerprint of a workspace path.
 ///
 /// Uses FNV-1a (64-bit) to produce a 16-char hex string that partitions the
@@ -312,6 +418,16 @@ impl std::error::Error for SessionControlError {}
 impl From<std::io::Error> for SessionControlError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<SessionControlError> for SessionBackendError {
+    fn from(value: SessionControlError) -> Self {
+        match value {
+            SessionControlError::Io(inner) => Self::Io(inner),
+            SessionControlError::Session(inner) => Self::Session(inner),
+            SessionControlError::Format(msg) => Self::Format(msg),
+        }
     }
 }
 
