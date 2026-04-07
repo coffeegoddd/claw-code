@@ -10,8 +10,10 @@ mod bootstrap;
 pub mod branch_lock;
 mod compact;
 mod config;
+pub mod config_store;
 pub mod config_validate;
 mod conversation;
+pub mod dolt_config_store;
 mod file_ops;
 mod git_context;
 pub mod green_contract;
@@ -70,10 +72,8 @@ pub use config::{
     RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig, ScopedMcpServerConfig,
     CLAW_SETTINGS_SCHEMA_NAME,
 };
-pub use config_validate::{
-    check_unsupported_format, format_diagnostics, validate_config_file, ConfigDiagnostic,
-    DiagnosticKind, ValidationResult,
-};
+pub use config_store::{ConfigLayer, ConfigStore, FileConfigStore};
+pub use dolt_config_store::DoltConfigStore;
 pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
     ConversationRuntime, PromptCacheEvent, RuntimeError, StaticToolExecutor, ToolError,
