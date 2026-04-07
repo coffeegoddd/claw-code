@@ -1,4 +1,6 @@
+pub mod dolt_plugin_registry_store;
 mod hooks;
+pub mod plugin_registry_store;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
@@ -10,13 +12,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub use dolt_plugin_registry_store::DoltPluginRegistryStore;
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
+pub use plugin_registry_store::{FilePluginRegistryStore, PluginRegistryStore};
 
 const EXTERNAL_MARKETPLACE: &str = "external";
 const BUILTIN_MARKETPLACE: &str = "builtin";
 const BUNDLED_MARKETPLACE: &str = "bundled";
-const SETTINGS_FILE_NAME: &str = "settings.json";
-const REGISTRY_FILE_NAME: &str = "installed.json";
+pub(crate) const SETTINGS_FILE_NAME: &str = "settings.json";
+pub(crate) const REGISTRY_FILE_NAME: &str = "installed.json";
 const MANIFEST_FILE_NAME: &str = "plugin.json";
 const MANIFEST_RELATIVE_PATH: &str = ".claude-plugin/plugin.json";
 
