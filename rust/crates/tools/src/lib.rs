@@ -1,3 +1,6 @@
+pub mod agent_store;
+pub mod dolt_agent_store;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
