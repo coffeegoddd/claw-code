@@ -1,10 +1,10 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::prompt_cache_store::{FilePromptCacheStore, PromptCacheStore, StoredCompletion};
 use crate::types::{MessageRequest, MessageResponse, Usage};
 
 const DEFAULT_COMPLETION_TTL_SECS: u64 = 30;
@@ -111,29 +111,44 @@ pub struct PromptCache {
 }
 
 impl PromptCache {
+    /// Create a prompt cache for the given session using the default
+    /// file-backed store.
     #[must_use]
     pub fn new(session_id: impl Into<String>) -> Self {
         Self::with_config(PromptCacheConfig::new(session_id))
     }
 
+    /// Create a prompt cache with custom configuration using the default
+    /// file-backed store.
     #[must_use]
     pub fn with_config(config: PromptCacheConfig) -> Self {
-        let paths = PromptCachePaths::for_session(&config.session_id);
-        let stats = read_json::<PromptCacheStats>(&paths.stats_path).unwrap_or_default();
-        let previous = read_json::<TrackedPromptState>(&paths.session_state_path);
+        Self::with_store(config, Arc::new(FilePromptCacheStore))
+    }
+
+    /// Create a prompt cache backed by the given [`PromptCacheStore`]
+    /// implementation.
+    #[must_use]
+    pub fn with_store(config: PromptCacheConfig, store: Arc<dyn PromptCacheStore>) -> Self {
+        let (stats, previous) = store.load_state(&config.session_id);
         Self {
             inner: Arc::new(Mutex::new(PromptCacheInner {
                 config,
-                paths,
+                store,
                 stats,
                 previous,
             })),
         }
     }
 
+    /// Return the filesystem paths for this session.
+    ///
+    /// This is a convenience for callers that know the underlying store is
+    /// file-backed. The paths are derived from the session ID regardless of
+    /// which store is in use.
     #[must_use]
     pub fn paths(&self) -> PromptCachePaths {
-        self.lock().paths.clone()
+        let session_id = self.lock().config.session_id.clone();
+        PromptCachePaths::for_session(&session_id)
     }
 
     #[must_use]
@@ -144,12 +159,16 @@ impl PromptCache {
     #[must_use]
     pub fn lookup_completion(&self, request: &MessageRequest) -> Option<MessageResponse> {
         let request_hash = request_hash_hex(request);
-        let (paths, ttl) = {
+        let (session_id, store, ttl) = {
             let inner = self.lock();
-            (inner.paths.clone(), inner.config.completion_ttl)
+            (
+                inner.config.session_id.clone(),
+                Arc::clone(&inner.store),
+                inner.config.completion_ttl,
+            )
         };
-        let entry_path = paths.completion_entry_path(&request_hash);
-        let entry = read_json::<CompletionCacheEntry>(&entry_path);
+
+        let entry = store.read_completion(&session_id, &request_hash);
         let Some(entry) = entry else {
             let mut inner = self.lock();
             inner.stats.completion_cache_misses += 1;
@@ -162,17 +181,18 @@ impl PromptCache {
             let mut inner = self.lock();
             inner.stats.completion_cache_misses += 1;
             inner.stats.last_completion_cache_key = Some(request_hash.clone());
-            let _ = fs::remove_file(entry_path);
+            store.delete_completion(&session_id, &request_hash);
             persist_state(&inner);
             return None;
         }
 
-        let expired = now_unix_secs().saturating_sub(entry.cached_at_unix_secs) >= ttl.as_secs();
+        let expired =
+            now_unix_secs().saturating_sub(entry.cached_at_unix_secs) >= ttl.as_secs();
         let mut inner = self.lock();
         inner.stats.last_completion_cache_key = Some(request_hash.clone());
         if expired {
             inner.stats.completion_cache_misses += 1;
-            let _ = fs::remove_file(entry_path);
+            store.delete_completion(&session_id, &request_hash);
             persist_state(&inner);
             return None;
         }
@@ -231,7 +251,14 @@ impl PromptCache {
 
         inner.previous = Some(current);
         if let Some(response) = response {
-            write_completion_entry(&inner.paths, &request_hash, response);
+            let stored = StoredCompletion {
+                cached_at_unix_secs: now_unix_secs(),
+                fingerprint_version: current_fingerprint_version(),
+                response: response.clone(),
+            };
+            inner
+                .store
+                .write_completion(&inner.config.session_id, &request_hash, &stored);
             inner.stats.completion_cache_writes += 1;
         }
         persist_state(&inner);
@@ -252,33 +279,26 @@ impl PromptCache {
 #[derive(Debug)]
 struct PromptCacheInner {
     config: PromptCacheConfig,
-    paths: PromptCachePaths,
+    store: Arc<dyn PromptCacheStore>,
     stats: PromptCacheStats,
     previous: Option<TrackedPromptState>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CompletionCacheEntry {
-    cached_at_unix_secs: u64,
-    #[serde(default = "current_fingerprint_version")]
-    fingerprint_version: u32,
-    response: MessageResponse,
-}
-
+/// Tracked prompt state persisted between requests for cache break detection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct TrackedPromptState {
-    observed_at_unix_secs: u64,
+pub(crate) struct TrackedPromptState {
+    pub(crate) observed_at_unix_secs: u64,
     #[serde(default = "current_fingerprint_version")]
-    fingerprint_version: u32,
-    model_hash: u64,
-    system_hash: u64,
-    tools_hash: u64,
-    messages_hash: u64,
-    cache_read_input_tokens: u32,
+    pub(crate) fingerprint_version: u32,
+    pub(crate) model_hash: u64,
+    pub(crate) system_hash: u64,
+    pub(crate) tools_hash: u64,
+    pub(crate) messages_hash: u64,
+    pub(crate) cache_read_input_tokens: u32,
 }
 
 impl TrackedPromptState {
-    fn from_usage(request: &MessageRequest, usage: &Usage) -> Self {
+    pub(crate) fn from_usage(request: &MessageRequest, usage: &Usage) -> Self {
         let hashes = RequestFingerprints::from_request(request);
         Self {
             observed_at_unix_secs: now_unix_secs(),
@@ -396,40 +416,11 @@ fn apply_usage_to_stats(
 }
 
 fn persist_state(inner: &PromptCacheInner) {
-    let _ = ensure_cache_dirs(&inner.paths);
-    let _ = write_json(&inner.paths.stats_path, &inner.stats);
-    if let Some(previous) = &inner.previous {
-        let _ = write_json(&inner.paths.session_state_path, previous);
-    }
-}
-
-fn write_completion_entry(
-    paths: &PromptCachePaths,
-    request_hash: &str,
-    response: &MessageResponse,
-) {
-    let _ = ensure_cache_dirs(paths);
-    let entry = CompletionCacheEntry {
-        cached_at_unix_secs: now_unix_secs(),
-        fingerprint_version: current_fingerprint_version(),
-        response: response.clone(),
-    };
-    let _ = write_json(&paths.completion_entry_path(request_hash), &entry);
-}
-
-fn ensure_cache_dirs(paths: &PromptCachePaths) -> std::io::Result<()> {
-    fs::create_dir_all(&paths.completion_dir)
-}
-
-fn write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    let json = serde_json::to_vec_pretty(value)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    fs::write(path, json)
-}
-
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    inner.store.persist_state(
+        &inner.config.session_id,
+        &inner.stats,
+        inner.previous.as_ref(),
+    );
 }
 
 fn request_hash_hex(request: &MessageRequest) -> String {
@@ -444,7 +435,7 @@ fn hash_serializable<T: Serialize>(value: &T) -> u64 {
     stable_hash_bytes(&json)
 }
 
-fn sanitize_path_segment(value: &str) -> String {
+pub(crate) fn sanitize_path_segment(value: &str) -> String {
     let sanitized: String = value
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
@@ -464,7 +455,7 @@ fn hash_string(value: &str) -> u64 {
     stable_hash_bytes(value.as_bytes())
 }
 
-fn base_cache_root() -> PathBuf {
+pub(crate) fn base_cache_root() -> PathBuf {
     if let Some(config_home) = std::env::var_os("CLAUDE_CONFIG_HOME") {
         return PathBuf::from(config_home)
             .join("cache")
@@ -479,7 +470,7 @@ fn base_cache_root() -> PathBuf {
     std::env::temp_dir().join("claude-prompt-cache")
 }
 
-fn now_unix_secs() -> u64 {
+pub(crate) fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
@@ -504,7 +495,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        detect_cache_break, read_json, request_hash_hex, sanitize_path_segment, PromptCache,
+        detect_cache_break, request_hash_hex, sanitize_path_segment, PromptCache,
         PromptCacheConfig, PromptCachePaths, TrackedPromptState, REQUEST_FINGERPRINT_PREFIX,
     };
     use crate::types::{InputMessage, MessageRequest, MessageResponse, OutputContentBlock, Usage};
@@ -615,8 +606,10 @@ mod tests {
         assert_eq!(stats.completion_cache_misses, 1);
         assert_eq!(stats.completion_cache_writes, 1);
 
-        let persisted = read_json::<super::PromptCacheStats>(&cache.paths().stats_path)
-            .expect("stats should persist");
+        let persisted_bytes =
+            std::fs::read(&cache.paths().stats_path).expect("stats file should exist");
+        let persisted: super::PromptCacheStats =
+            serde_json::from_slice(&persisted_bytes).expect("stats should deserialize");
         assert_eq!(persisted.completion_cache_hits, 1);
 
         std::fs::remove_dir_all(temp_root).expect("cleanup temp root");

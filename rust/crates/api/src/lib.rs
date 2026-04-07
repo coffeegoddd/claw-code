@@ -1,7 +1,9 @@
 mod client;
+pub mod dolt_prompt_cache_store;
 mod error;
 mod http_client;
 mod prompt_cache;
+pub mod prompt_cache_store;
 mod providers;
 mod sse;
 mod types;
@@ -14,10 +16,12 @@ pub use error::ApiError;
 pub use http_client::{
     build_http_client, build_http_client_or_default, build_http_client_with, ProxyConfig,
 };
+pub use dolt_prompt_cache_store::DoltPromptCacheStore;
 pub use prompt_cache::{
     CacheBreakEvent, PromptCache, PromptCacheConfig, PromptCachePaths, PromptCacheRecord,
     PromptCacheStats,
 };
+pub use prompt_cache_store::{FilePromptCacheStore, PromptCacheStore, StoredCompletion};
 pub use providers::anthropic::{AnthropicClient, AnthropicClient as ApiClient, AuthSource};
 pub use providers::openai_compat::{OpenAiCompatClient, OpenAiCompatConfig};
 pub use providers::{
