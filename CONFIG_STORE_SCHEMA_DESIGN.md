@@ -63,10 +63,10 @@ There is no trait abstraction. `ConfigLoader` is a concrete struct with
    `ConfigSource`. Precedence is determined by the enum ordering, not by
    row position.
 
-4. **Workspace scoping for project/local configs** — user configs are global,
-   but project and local configs are per-workspace. A
-   `workspace_fingerprint` column (nullable for user scope) provides
-   isolation.
+4. **Workspace isolation via Dolt branches** — user config lives on `main`.
+   Project and local config live on `workspace/<fingerprint>` branches
+   (see `DOLT_BRANCHING_STRATEGY.md`). No `workspace_fingerprint` column
+   needed.
 
 5. **Config history via Dolt versioning** — `dolt diff` shows when and how
    config changed. Currently there is no history since the files are just
@@ -83,18 +83,16 @@ One row per config layer. Replaces the 5 config files.
 ```sql
 CREATE TABLE config_entries (
     scope                  ENUM('user', 'project', 'local') NOT NULL,
-    workspace_fingerprint  VARCHAR(16),
     config_json            JSON          NOT NULL,
     updated_at_ms          BIGINT UNSIGNED NOT NULL,
 
-    PRIMARY KEY (scope, workspace_fingerprint),
-    INDEX idx_workspace (workspace_fingerprint)
+    PRIMARY KEY (scope)
 );
 ```
 
 **Notes:**
-- `workspace_fingerprint` is `NULL` for `user` scope (global config)
-- `workspace_fingerprint` is set for `project` and `local` scopes
+- User-scope rows live on the `main` branch (global config)
+- Project and local-scope rows live on `workspace/<fingerprint>` branches
 - `config_json` holds the full JSON object for that layer (same content
   as the corresponding file today)
 - Legacy files (`~/.claw.json`, `<cwd>/.claw.json`) are folded into
@@ -110,10 +108,10 @@ CREATE TABLE config_entries (
 
 **Dolt:**
 ```sql
-SELECT scope, config_json
-  FROM config_entries
- WHERE workspace_fingerprint IS NULL
-    OR workspace_fingerprint = ?
+-- Read user config from main branch:
+SELECT scope, config_json FROM `main`.config_entries WHERE scope = 'user';
+-- Read project/local config from workspace branch:
+SELECT scope, config_json FROM config_entries WHERE scope IN ('project', 'local')
  ORDER BY FIELD(scope, 'user', 'project', 'local');
 ```
 
@@ -142,10 +140,10 @@ all feature parsers remain unchanged in application code.
 
 **Dolt:**
 ```sql
-SELECT config_json
-  FROM config_entries
- WHERE scope = ?
-   AND (workspace_fingerprint IS NULL OR workspace_fingerprint = ?);
+-- User scope: read from main
+SELECT config_json FROM `main`.config_entries WHERE scope = 'user';
+-- Project/local scope: read from workspace branch
+SELECT config_json FROM config_entries WHERE scope = ?;
 ```
 
 ### Write config layer
@@ -155,8 +153,8 @@ human-authored.
 
 **Dolt:** When external tools or the user wants to update config:
 ```sql
-REPLACE INTO config_entries (scope, workspace_fingerprint, config_json, updated_at_ms)
-VALUES (?, ?, ?, ?);
+REPLACE INTO config_entries (scope, config_json, updated_at_ms)
+VALUES (?, ?, ?);
 ```
 
 This enables programmatic config updates (e.g., a CLI `claw config set`
@@ -168,9 +166,7 @@ command) that weren't possible with the read-only file approach.
 
 **Dolt:**
 ```sql
-DELETE FROM config_entries
- WHERE scope = ?
-   AND (workspace_fingerprint IS NULL OR workspace_fingerprint = ?);
+DELETE FROM config_entries WHERE scope = ?;
 ```
 
 ### List all config for a workspace
@@ -179,10 +175,12 @@ DELETE FROM config_entries
 
 **Dolt:**
 ```sql
+-- User config from main, project/local from workspace branch:
 SELECT scope, config_json, updated_at_ms
-  FROM config_entries
- WHERE workspace_fingerprint IS NULL
-    OR workspace_fingerprint = ?
+  FROM `main`.config_entries WHERE scope = 'user'
+UNION ALL
+SELECT scope, config_json, updated_at_ms
+  FROM config_entries WHERE scope IN ('project', 'local')
  ORDER BY FIELD(scope, 'user', 'project', 'local');
 ```
 
@@ -190,13 +188,8 @@ SELECT scope, config_json, updated_at_ms
 
 **File-backed:** Impossible — would require scanning all project directories.
 
-**Dolt:**
-```sql
-SELECT workspace_fingerprint, config_json
-  FROM config_entries
- WHERE scope = 'project'
-   AND JSON_EXTRACT(config_json, '$.model') IS NOT NULL;
-```
+**Dolt:** Query across workspace branches using Dolt's branch-qualified
+table names or `dolt_branches` system table.
 
 ---
 

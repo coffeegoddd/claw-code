@@ -246,7 +246,6 @@ impl SessionBackend for SessionStore {
     fn create_session(
         &self,
         session: &Session,
-        _workspace_fingerprint: &str,
     ) -> Result<(), SessionBackendError> {
         let handle = self.create_handle(&session.session_id);
         let session = session.clone().with_persistence_path(handle.path.clone());
@@ -320,14 +319,12 @@ impl SessionBackend for SessionStore {
 
     fn list_sessions(
         &self,
-        _workspace_fingerprint: &str,
     ) -> Result<Vec<ManagedSessionSummary>, SessionBackendError> {
         Ok(SessionStore::list_sessions(self)?)
     }
 
     fn resolve_reference(
         &self,
-        _workspace_fingerprint: &str,
         reference: &str,
     ) -> Result<String, SessionBackendError> {
         let handle = SessionStore::resolve_reference(self, reference)?;

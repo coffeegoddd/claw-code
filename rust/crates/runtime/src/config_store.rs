@@ -27,38 +27,31 @@ pub struct ConfigLayer {
 /// [`FileConfigStore`] is the original file-backed implementation.
 /// [`DoltConfigStore`](crate::dolt_config_store::DoltConfigStore) is the
 /// planned Dolt replacement.
+/// Low-level storage operations for configuration data.
+///
+/// Workspace isolation is handled internally by each backend — the file
+/// backend uses directory paths, the Dolt backend reads user config from
+/// `main` and project/local config from the workspace branch (see
+/// `DOLT_BRANCHING_STRATEGY.md`). Callers never pass workspace identifiers.
 pub trait ConfigStore: Debug + Send + Sync {
-    /// Load all config layers applicable to this workspace, in precedence
-    /// order (lowest first). Layers with missing or empty content are
-    /// omitted.
-    fn load_layers(
-        &self,
-        workspace_fingerprint: Option<&str>,
-    ) -> Result<Vec<ConfigLayer>, ConfigError>;
+    /// Load all config layers in precedence order (lowest first).
+    /// Layers with missing or empty content are omitted.
+    fn load_layers(&self) -> Result<Vec<ConfigLayer>, ConfigError>;
 
     /// Load a single config layer by scope. Returns `None` if the layer
     /// does not exist.
-    fn load_layer(
-        &self,
-        scope: ConfigSource,
-        workspace_fingerprint: Option<&str>,
-    ) -> Result<Option<ConfigLayer>, ConfigError>;
+    fn load_layer(&self, scope: ConfigSource) -> Result<Option<ConfigLayer>, ConfigError>;
 
     /// Write a config layer. Creates or replaces the layer for the given
-    /// scope and workspace.
+    /// scope.
     fn store_layer(
         &self,
         scope: ConfigSource,
-        workspace_fingerprint: Option<&str>,
         object: &BTreeMap<String, JsonValue>,
     ) -> Result<(), ConfigError>;
 
     /// Delete a config layer. No-op if it doesn't exist.
-    fn delete_layer(
-        &self,
-        scope: ConfigSource,
-        workspace_fingerprint: Option<&str>,
-    ) -> Result<(), ConfigError>;
+    fn delete_layer(&self, scope: ConfigSource) -> Result<(), ConfigError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,10 +107,7 @@ impl FileConfigStore {
 }
 
 impl ConfigStore for FileConfigStore {
-    fn load_layers(
-        &self,
-        _workspace_fingerprint: Option<&str>,
-    ) -> Result<Vec<ConfigLayer>, ConfigError> {
+    fn load_layers(&self) -> Result<Vec<ConfigLayer>, ConfigError> {
         let mut layers = Vec::new();
         for (scope, path) in self.file_entries() {
             if let Some(layer) = read_config_layer(scope, &path)? {
@@ -127,11 +117,7 @@ impl ConfigStore for FileConfigStore {
         Ok(layers)
     }
 
-    fn load_layer(
-        &self,
-        scope: ConfigSource,
-        _workspace_fingerprint: Option<&str>,
-    ) -> Result<Option<ConfigLayer>, ConfigError> {
+    fn load_layer(&self, scope: ConfigSource) -> Result<Option<ConfigLayer>, ConfigError> {
         for (entry_scope, path) in self.file_entries() {
             if entry_scope == scope {
                 if let Some(layer) = read_config_layer(scope, &path)? {
@@ -145,7 +131,6 @@ impl ConfigStore for FileConfigStore {
     fn store_layer(
         &self,
         _scope: ConfigSource,
-        _workspace_fingerprint: Option<&str>,
         _object: &BTreeMap<String, JsonValue>,
     ) -> Result<(), ConfigError> {
         // File-backed config is read-only from the application's perspective.
@@ -154,11 +139,7 @@ impl ConfigStore for FileConfigStore {
         ))
     }
 
-    fn delete_layer(
-        &self,
-        _scope: ConfigSource,
-        _workspace_fingerprint: Option<&str>,
-    ) -> Result<(), ConfigError> {
+    fn delete_layer(&self, _scope: ConfigSource) -> Result<(), ConfigError> {
         Err(ConfigError::Parse(
             "FileConfigStore does not support deletes".to_string(),
         ))

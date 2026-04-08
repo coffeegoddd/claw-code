@@ -10,27 +10,29 @@ use crate::session_control::ManagedSessionSummary;
 /// schema defined in `SESSIONS_SCHEMA_DESIGN.md`. Replaces the file-backed
 /// [`SessionStore`](crate::session_control::SessionStore) for environments
 /// where versioned, queryable storage is preferred.
+///
+/// Workspace isolation is handled via Dolt branches — this backend operates
+/// on a `workspace/<fingerprint>` branch. See `DOLT_BRANCHING_STRATEGY.md`.
 #[derive(Debug, Clone)]
 pub struct DoltSessionBackend {
     /// Connection string or path to the Dolt database.
     pub connection: String,
+    /// The Dolt branch this backend operates on (e.g., `workspace/a1b2c3d4`).
+    pub branch: String,
 }
 
 impl DoltSessionBackend {
     #[must_use]
-    pub fn new(connection: impl Into<String>) -> Self {
+    pub fn new(connection: impl Into<String>, branch: impl Into<String>) -> Self {
         Self {
             connection: connection.into(),
+            branch: branch.into(),
         }
     }
 }
 
 impl SessionBackend for DoltSessionBackend {
-    fn create_session(
-        &self,
-        _session: &Session,
-        _workspace_fingerprint: &str,
-    ) -> Result<(), SessionBackendError> {
+    fn create_session(&self, _session: &Session) -> Result<(), SessionBackendError> {
         Err(SessionBackendError::Unimplemented(
             "DoltSessionBackend::create_session".to_string(),
         ))
@@ -90,10 +92,7 @@ impl SessionBackend for DoltSessionBackend {
         ))
     }
 
-    fn list_sessions(
-        &self,
-        _workspace_fingerprint: &str,
-    ) -> Result<Vec<ManagedSessionSummary>, SessionBackendError> {
+    fn list_sessions(&self) -> Result<Vec<ManagedSessionSummary>, SessionBackendError> {
         Err(SessionBackendError::Unimplemented(
             "DoltSessionBackend::list_sessions".to_string(),
         ))
@@ -101,7 +100,6 @@ impl SessionBackend for DoltSessionBackend {
 
     fn resolve_reference(
         &self,
-        _workspace_fingerprint: &str,
         _reference: &str,
     ) -> Result<String, SessionBackendError> {
         Err(SessionBackendError::Unimplemented(

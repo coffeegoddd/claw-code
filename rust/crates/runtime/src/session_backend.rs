@@ -12,13 +12,15 @@ use crate::session_control::ManagedSessionSummary;
 /// The file-backed [`SessionStore`](crate::session_control::SessionStore) is the
 /// original implementation. [`DoltSessionBackend`](crate::dolt_session_backend::DoltSessionBackend)
 /// is the planned replacement that stores sessions in a Dolt database.
+/// Abstraction over session persistence backends.
+///
+/// Workspace isolation is handled internally by each backend — the file
+/// backend uses directory fingerprinting, the Dolt backend uses branches
+/// (see `DOLT_BRANCHING_STRATEGY.md`). Callers never pass workspace
+/// identifiers.
 pub trait SessionBackend {
     /// Persist a newly created session (metadata only, no messages yet).
-    fn create_session(
-        &self,
-        session: &Session,
-        workspace_fingerprint: &str,
-    ) -> Result<(), SessionBackendError>;
+    fn create_session(&self, session: &Session) -> Result<(), SessionBackendError>;
 
     /// Load a full session by ID: metadata, messages, prompt history.
     fn load_session(&self, session_id: &str) -> Result<Session, SessionBackendError>;
@@ -58,18 +60,13 @@ pub trait SessionBackend {
         branch_name: Option<&str>,
     ) -> Result<Session, SessionBackendError>;
 
-    /// List sessions visible in the given workspace, sorted by last-modified
-    /// descending.
-    fn list_sessions(
-        &self,
-        workspace_fingerprint: &str,
-    ) -> Result<Vec<ManagedSessionSummary>, SessionBackendError>;
+    /// List sessions sorted by last-modified descending.
+    fn list_sessions(&self) -> Result<Vec<ManagedSessionSummary>, SessionBackendError>;
 
     /// Resolve a session reference (ID, path, or alias like "latest") to a
     /// concrete session ID.
     fn resolve_reference(
         &self,
-        workspace_fingerprint: &str,
         reference: &str,
     ) -> Result<String, SessionBackendError>;
 

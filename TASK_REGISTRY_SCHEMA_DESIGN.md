@@ -55,9 +55,10 @@ Neither system has a trait abstraction or swappable backend.
    a unit, never queried field-by-field. A JSON column avoids a 1:1 join table
    with 8 columns.
 
-6. **Workspace scoping** — todos and tasks are project-scoped. A
-   `workspace_fingerprint` column (same FNV-1a scheme as sessions) isolates
-   per-project data.
+6. **Workspace isolation via Dolt branches** — todos and tasks are
+   project-scoped. Each workspace operates on its own
+   `workspace/<fingerprint>` branch (see `DOLT_BRANCHING_STRATEGY.md`).
+   No `workspace_fingerprint` column needed.
 
 ---
 
@@ -69,13 +70,12 @@ One row per todo item. Replaces `.clawd-todos.json`.
 
 ```sql
 CREATE TABLE todos (
-    workspace_fingerprint  VARCHAR(16)     NOT NULL,
     ordinal                INT UNSIGNED    NOT NULL,
     content                TEXT            NOT NULL,
     active_form            TEXT            NOT NULL,
     status                 ENUM('pending', 'in_progress', 'completed') NOT NULL,
 
-    PRIMARY KEY (workspace_fingerprint, ordinal)
+    PRIMARY KEY (ordinal)
 );
 ```
 
@@ -86,7 +86,6 @@ One row per task. Persists the in-memory `TaskRegistry`.
 ```sql
 CREATE TABLE tasks (
     task_id                VARCHAR(128)    NOT NULL,
-    workspace_fingerprint  VARCHAR(16)     NOT NULL,
     prompt                 LONGTEXT        NOT NULL,
     description            TEXT,
     task_packet_json       JSON,
@@ -98,7 +97,7 @@ CREATE TABLE tasks (
     updated_at             BIGINT UNSIGNED NOT NULL,
 
     PRIMARY KEY (task_id),
-    INDEX idx_workspace_status (workspace_fingerprint, status),
+    INDEX idx_status (status),
     INDEX idx_team (team_id)
 );
 ```
@@ -154,7 +153,6 @@ array.
 ```sql
 SELECT ordinal, content, active_form, status
   FROM todos
- WHERE workspace_fingerprint = ?
  ORDER BY ordinal;
 ```
 
@@ -164,11 +162,11 @@ SELECT ordinal, content, active_form, status
 
 **Dolt:**
 ```sql
-DELETE FROM todos WHERE workspace_fingerprint = ?;
+DELETE FROM todos;
 
-INSERT INTO todos (workspace_fingerprint, ordinal, content, active_form, status)
-VALUES (?, 0, ?, ?, ?),
-       (?, 1, ?, ?, ?),
+INSERT INTO todos (ordinal, content, active_form, status)
+VALUES (0, ?, ?, ?),
+       (1, ?, ?, ?),
        ...;
 ```
 
@@ -179,11 +177,9 @@ VALUES (?, 0, ?, ?, ?),
 **Dolt:**
 ```sql
 DELETE FROM todos
- WHERE workspace_fingerprint = ?
-   AND NOT EXISTS (
+ WHERE NOT EXISTS (
        SELECT 1 FROM todos t2
-        WHERE t2.workspace_fingerprint = ?
-          AND t2.status != 'completed'
+        WHERE t2.status != 'completed'
    );
 ```
 
@@ -191,8 +187,8 @@ DELETE FROM todos
 
 **File-backed:** `$CLAWD_TODO_STORE` env var or `<cwd>/.clawd-todos.json`.
 
-**Dolt:** `WHERE workspace_fingerprint = ?` — env var override becomes
-unnecessary.
+**Dolt:** Each workspace operates on its own Dolt branch. Env var override
+becomes unnecessary.
 
 ---
 
@@ -205,9 +201,9 @@ unnecessary.
 **Dolt:**
 ```sql
 INSERT INTO tasks (
-    task_id, workspace_fingerprint, prompt, description,
+    task_id, prompt, description,
     task_packet_json, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, 'created', ?, ?);
+) VALUES (?, ?, ?, ?, 'created', ?, ?);
 ```
 
 ### Create task from packet
@@ -217,9 +213,9 @@ INSERT INTO tasks (
 **Dolt:**
 ```sql
 INSERT INTO tasks (
-    task_id, workspace_fingerprint, prompt, description,
+    task_id, prompt, description,
     task_packet_json, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, 'created', ?, ?);
+) VALUES (?, ?, ?, ?, 'created', ?, ?);
 ```
 
 Where `prompt` = `packet.objective`, `description` = `packet.scope`, and
@@ -246,8 +242,7 @@ SELECT ordinal, role, content, timestamp
 **Dolt:**
 ```sql
 SELECT * FROM tasks
- WHERE workspace_fingerprint = ?
-   [AND status = ?]
+   [WHERE status = ?]
  ORDER BY created_at DESC;
 ```
 

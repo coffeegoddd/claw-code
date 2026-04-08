@@ -10,17 +10,23 @@ use crate::TaskPacket;
 /// defined in `TASK_REGISTRY_SCHEMA_DESIGN.md`. Replaces the in-memory
 /// [`TaskRegistry`](crate::task_registry::TaskRegistry) for environments where
 /// durable, queryable task storage is preferred.
+///
+/// Operates on a `workspace/<fingerprint>` branch. See
+/// `DOLT_BRANCHING_STRATEGY.md`.
 #[derive(Debug, Clone)]
 pub struct DoltTaskRegistryBackend {
     /// Connection string or path to the Dolt database.
     pub connection: String,
+    /// The Dolt branch this backend operates on.
+    pub branch: String,
 }
 
 impl DoltTaskRegistryBackend {
     #[must_use]
-    pub fn new(connection: impl Into<String>) -> Self {
+    pub fn new(connection: impl Into<String>, branch: impl Into<String>) -> Self {
         Self {
             connection: connection.into(),
+            branch: branch.into(),
         }
     }
 }

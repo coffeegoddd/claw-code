@@ -62,9 +62,10 @@ There are no runtime read paths — manifests are only read in tests.
    events carry provenance data. A JSON column on the lane events table
    avoids a rarely-populated join table.
 
-5. **Workspace scoping** — agents are project-scoped (via `agent_store_dir`
-   which walks 2 ancestors). A `workspace_fingerprint` column provides
-   isolation.
+5. **Workspace isolation via Dolt branches** — agents are project-scoped.
+   Each workspace operates on its own `workspace/<fingerprint>` branch
+   (see `DOLT_BRANCHING_STRATEGY.md`). No `workspace_fingerprint` column
+   needed.
 
 6. **Timestamps as strings** — the current implementation stores timestamps
    as ISO8601 strings (seconds since epoch). The schema preserves this for
@@ -82,7 +83,6 @@ One row per agent. Replaces the `<agent_id>.json` manifest files.
 ```sql
 CREATE TABLE agents (
     agent_id               VARCHAR(128)    NOT NULL,
-    workspace_fingerprint  VARCHAR(16)     NOT NULL,
     name                   VARCHAR(256)    NOT NULL,
     description            TEXT            NOT NULL,
     subagent_type          VARCHAR(64),
@@ -97,8 +97,8 @@ CREATE TABLE agents (
     current_blocker_json   JSON,
 
     PRIMARY KEY (agent_id),
-    INDEX idx_workspace_status (workspace_fingerprint, status),
-    INDEX idx_derived_state (workspace_fingerprint, derived_state)
+    INDEX idx_status (status),
+    INDEX idx_derived_state (derived_state)
 );
 ```
 
@@ -168,7 +168,7 @@ Only populated for `lane.commit.created` events:
 **Dolt:**
 ```sql
 INSERT INTO agents (
-    agent_id, workspace_fingerprint, name, description,
+    agent_id, name, description,
     subagent_type, model, status, output,
     created_at, started_at, derived_state
 ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, 'working');
@@ -254,7 +254,6 @@ SELECT * FROM agent_lane_events
 ```sql
 SELECT agent_id, name, status, derived_state, created_at, completed_at
   FROM agents
- WHERE workspace_fingerprint = ?
  ORDER BY created_at DESC;
 ```
 

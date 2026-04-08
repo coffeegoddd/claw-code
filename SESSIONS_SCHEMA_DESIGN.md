@@ -13,9 +13,10 @@
    session and always loaded with session metadata. No reason for separate
    tables.
 
-3. **Workspace isolation via column filter** — replaces the filesystem
-   fingerprint-directory scheme. Same FNV-1a hash, just a `WHERE` clause
-   instead of a directory path.
+3. **Workspace isolation via Dolt branches** — replaces the filesystem
+   fingerprint-directory scheme. Each workspace operates on its own
+   `workspace/<fingerprint>` branch (see `DOLT_BRANCHING_STRATEGY.md`).
+   No `workspace_fingerprint` column needed on workspace-scoped tables.
 
 4. **Explicit `ordinal` on messages** — replaces implicit array-index /
    line-order in JSONL.
@@ -39,7 +40,6 @@ One row per session. Replaces the `session_meta` JSONL record, file existence,
 ```sql
 CREATE TABLE sessions (
     session_id                    VARCHAR(128)    NOT NULL,
-    workspace_fingerprint         VARCHAR(16)     NOT NULL,
     workspace_root                TEXT,
     version                       INT UNSIGNED    NOT NULL DEFAULT 1,
     created_at_ms                 BIGINT UNSIGNED NOT NULL,
@@ -55,7 +55,7 @@ CREATE TABLE sessions (
     compaction_summary            LONGTEXT,
 
     PRIMARY KEY (session_id),
-    INDEX idx_workspace_updated (workspace_fingerprint, updated_at_ms DESC),
+    INDEX idx_updated (updated_at_ms DESC),
     INDEX idx_fork_parent (fork_parent_session_id)
 );
 ```
@@ -144,9 +144,9 @@ How each current file-backed operation maps to Dolt queries.
 **Dolt:**
 ```sql
 INSERT INTO sessions (
-    session_id, workspace_fingerprint, workspace_root,
+    session_id, workspace_root,
     version, created_at_ms, updated_at_ms
-) VALUES (?, ?, ?, 1, ?, ?);
+) VALUES (?, ?, 1, ?, ?);
 ```
 
 ### Append message
@@ -208,7 +208,6 @@ SELECT s.session_id,
        (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.session_id)
            AS message_count
   FROM sessions s
- WHERE s.workspace_fingerprint = ?
  ORDER BY s.updated_at_ms DESC;
 ```
 
@@ -219,7 +218,6 @@ SELECT s.session_id,
 **Dolt:**
 ```sql
 SELECT session_id FROM sessions
- WHERE workspace_fingerprint = ?
  ORDER BY updated_at_ms DESC
  LIMIT 1;
 ```
@@ -240,12 +238,12 @@ SELECT session_id FROM sessions WHERE session_id = ?;
 **Dolt:**
 ```sql
 INSERT INTO sessions (
-    session_id, workspace_fingerprint, workspace_root,
+    session_id, workspace_root,
     version, created_at_ms, updated_at_ms,
     fork_parent_session_id, fork_branch_name,
     compaction_count, compaction_removed_msg_count, compaction_summary
 )
-SELECT ?, workspace_fingerprint, workspace_root,
+SELECT ?, workspace_root,
        version, ?, ?,
        ?, ?,
        compaction_count, compaction_removed_msg_count, compaction_summary
@@ -296,7 +294,8 @@ Previous states are recoverable via `dolt log` / `dolt diff`.
 
 **File-backed:** Directory `sessions/<fingerprint>/`
 
-**Dolt:** `WHERE workspace_fingerprint = ?`
+**Dolt:** Each workspace operates on its own `workspace/<fingerprint>` Dolt
+branch. No column filter needed. See `DOLT_BRANCHING_STRATEGY.md`.
 
 ---
 

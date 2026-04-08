@@ -8,17 +8,23 @@ use crate::agent_store::{AgentManifest, AgentStore, AgentStoreError};
 /// the schema defined in `AGENT_STORE_SCHEMA_DESIGN.md`. Replaces
 /// [`FileAgentStore`](crate::agent_store::FileAgentStore) for environments
 /// where versioned, queryable storage is preferred.
+///
+/// Operates on a `workspace/<fingerprint>` branch. See
+/// `DOLT_BRANCHING_STRATEGY.md`.
 #[derive(Debug, Clone)]
 pub struct DoltAgentStore {
     /// Connection string or path to the Dolt database.
     pub connection: String,
+    /// The Dolt branch this backend operates on.
+    pub branch: String,
 }
 
 impl DoltAgentStore {
     #[must_use]
-    pub fn new(connection: impl Into<String>) -> Self {
+    pub fn new(connection: impl Into<String>, branch: impl Into<String>) -> Self {
         Self {
             connection: connection.into(),
+            branch: branch.into(),
         }
     }
 }
