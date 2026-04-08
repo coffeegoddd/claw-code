@@ -1129,6 +1129,9 @@ mod tests {
         session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
             text: "hello".to_string(),
         }]));
+        session
+            .save_to_path(&path)
+            .expect("updated save should succeed");
 
         let restored = Session::load_from_path(&path).expect("session should replay from jsonl");
         fs::remove_file(&path).expect("temp file should be removable");

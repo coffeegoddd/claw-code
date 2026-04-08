@@ -13,7 +13,11 @@
     clippy::manual_repeat_n,
     clippy::assigning_clones,
     clippy::manual_str_repeat,
+    clippy::map_unwrap_or,
+    clippy::result_map_or_into_option,
+    clippy::semicolon_if_nothing_returned,
     clippy::too_many_lines,
+    clippy::uninlined_format_args,
     clippy::unneeded_struct_pattern,
     clippy::unnecessary_wraps,
     clippy::unused_self
@@ -9901,18 +9905,17 @@ UU conflicted.rs",
         assert!(session_path.ends_with("session-alpha.jsonl"));
 
         // Save the legacy session inside the fingerprinted sessions directory
-        // so that resolve_session_reference can find it.
-        let sessions = sessions_dir().expect("sessions dir");
-        let legacy_path = sessions.join("legacy.json");
+        // so that the backend can find it.
+        let legacy_path = std::path::PathBuf::from(backend.storage_location()).join("legacy.json");
         Session::new()
             .with_persistence_path(legacy_path.clone())
             .save_to_path(&legacy_path)
             .expect("legacy session should save");
 
-        let resolved_id = backend
+        let resolved = backend
             .resolve_reference("legacy")
             .expect("legacy session should resolve via backend");
-        assert_eq!(resolved_id, "legacy");
+        assert_eq!(resolved.id, "legacy");
 
         std::fs::remove_dir_all(workspace).expect("workspace should clean up");
     }
@@ -9923,26 +9926,26 @@ UU conflicted.rs",
         std::fs::create_dir_all(&workspace).expect("workspace should create");
 
         let backend = SessionStore::from_cwd(&workspace).expect("backend should build");
+        let older = Session::new();
         let older_path = backend
-            .session_path("session-older")
+            .session_path(&older.session_id)
             .expect("file backend should return a path");
-        Session::new()
-            .with_persistence_path(older_path.clone())
+        older
             .save_to_path(&older_path)
             .expect("older session should save");
         std::thread::sleep(Duration::from_millis(20));
+        let newer = Session::new();
         let newer_path = backend
-            .session_path("session-newer")
+            .session_path(&newer.session_id)
             .expect("file backend should return a path");
-        Session::new()
-            .with_persistence_path(newer_path.clone())
+        newer
             .save_to_path(&newer_path)
             .expect("newer session should save");
 
-        let resolved_id = backend
+        let resolved = backend
             .resolve_reference("latest")
             .expect("latest session should resolve via backend");
-        assert_eq!(resolved_id, "session-newer");
+        assert_eq!(resolved.id, newer.session_id);
 
         std::fs::remove_dir_all(workspace).expect("workspace should clean up");
     }

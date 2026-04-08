@@ -17,8 +17,7 @@ use api::{
 use plugins::PluginTool;
 use reqwest::blocking::Client;
 use runtime::{
-    check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
-    grep_search, load_system_prompt,
+    check_freshness, edit_file, execute_bash, glob_search, grep_search, load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
@@ -3224,6 +3223,7 @@ fn execute_agent(input: AgentInput, store: Arc<dyn AgentStore>) -> Result<AgentM
     execute_agent_with_spawn(input, store, spawn_agent_job)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn execute_agent_with_spawn<F>(
     input: AgentInput,
     store: Arc<dyn AgentStore>,
@@ -3300,7 +3300,7 @@ where
     };
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
-        persist_agent_terminal_state(&store, &manifest, "failed", None, Some(error.clone()))?;
+        persist_agent_terminal_state(&*store, &manifest, "failed", None, Some(error.clone()))?;
         return Err(error);
     }
 
@@ -3318,7 +3318,7 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     let _ = persist_agent_terminal_state(
-                        &job.store,
+                        &*job.store,
                         &job.manifest,
                         "failed",
                         None,
@@ -3327,7 +3327,7 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
                 }
                 Err(_) => {
                     let _ = persist_agent_terminal_state(
-                        &job.store,
+                        &*job.store,
                         &job.manifest,
                         "failed",
                         None,
@@ -3347,7 +3347,7 @@ fn run_agent_job(job: &AgentJob) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let final_text = final_assistant_text(&summary);
     persist_agent_terminal_state(
-        &job.store,
+        &*job.store,
         &job.manifest,
         "completed",
         Some(final_text.as_str()),
@@ -5292,8 +5292,8 @@ mod tests {
         classify_lane_failure, derive_agent_state, execute_agent_with_spawn, execute_tool,
         final_assistant_text, maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
         persist_agent_terminal_state, push_output_block, run_task_packet, AgentInput, AgentJob,
-        AgentManifest, AgentStore, GlobalToolRegistry, LaneEventName, LaneFailureClass,
-        ProviderRuntimeClient, SubagentToolExecutor,
+        AgentStore, GlobalToolRegistry, LaneEventName, LaneFailureClass, ProviderRuntimeClient,
+        SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::ProviderFallbackConfig;

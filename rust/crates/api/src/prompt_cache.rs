@@ -285,15 +285,15 @@ struct PromptCacheInner {
 
 /// Tracked prompt state persisted between requests for cache break detection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TrackedPromptState {
-    pub(crate) observed_at_unix_secs: u64,
+pub struct TrackedPromptState {
+    pub observed_at_unix_secs: u64,
     #[serde(default = "current_fingerprint_version")]
-    pub(crate) fingerprint_version: u32,
-    pub(crate) model_hash: u64,
-    pub(crate) system_hash: u64,
-    pub(crate) tools_hash: u64,
-    pub(crate) messages_hash: u64,
-    pub(crate) cache_read_input_tokens: u32,
+    pub fingerprint_version: u32,
+    pub model_hash: u64,
+    pub system_hash: u64,
+    pub tools_hash: u64,
+    pub messages_hash: u64,
+    pub cache_read_input_tokens: u32,
 }
 
 impl TrackedPromptState {

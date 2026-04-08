@@ -186,11 +186,9 @@ fn resume_latest_restores_the_most_recent_managed_session() {
     let store = SessionStore::from_cwd(&project_dir).expect("store should build");
     let sessions_dir = store.sessions_dir().to_path_buf();
 
-    let older_path = sessions_dir.join("session-older.jsonl");
-    let newer_path = sessions_dir.join("session-newer.jsonl");
-
-    let mut older = Session::new().with_persistence_path(&older_path);
+    let mut older = Session::new();
     older.push_user_text("older session");
+    let older_path = sessions_dir.join(format!("{}.jsonl", older.session_id));
     older
         .save_to_path(&older_path)
         .expect("older session should persist");
@@ -198,9 +196,10 @@ fn resume_latest_restores_the_most_recent_managed_session() {
     // Ensure the newer session gets a later mtime so "latest" resolves correctly.
     std::thread::sleep(std::time::Duration::from_millis(20));
 
-    let mut newer = Session::new().with_persistence_path(&newer_path);
+    let mut newer = Session::new();
     newer.push_user_text("newer session");
     newer.push_user_text("resume me");
+    let newer_path = sessions_dir.join(format!("{}.jsonl", newer.session_id));
     newer
         .save_to_path(&newer_path)
         .expect("newer session should persist");

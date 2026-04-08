@@ -64,35 +64,35 @@ pub trait PromptCacheStore: Debug + Send + Sync {
 pub struct FilePromptCacheStore;
 
 impl FilePromptCacheStore {
-    fn paths_for(&self, session_id: &str) -> PromptCachePaths {
+    fn paths_for(session_id: &str) -> PromptCachePaths {
         PromptCachePaths::for_session(session_id)
     }
 
-    fn ensure_dirs(&self, paths: &PromptCachePaths) {
+    fn ensure_dirs(paths: &PromptCachePaths) {
         let _ = fs::create_dir_all(&paths.completion_dir);
     }
 }
 
 impl PromptCacheStore for FilePromptCacheStore {
     fn read_completion(&self, session_id: &str, request_hash: &str) -> Option<StoredCompletion> {
-        let paths = self.paths_for(session_id);
+        let paths = Self::paths_for(session_id);
         let entry_path = paths.completion_entry_path(request_hash);
         read_json(&entry_path)
     }
 
     fn write_completion(&self, session_id: &str, request_hash: &str, entry: &StoredCompletion) {
-        let paths = self.paths_for(session_id);
-        self.ensure_dirs(&paths);
+        let paths = Self::paths_for(session_id);
+        Self::ensure_dirs(&paths);
         let _ = write_json(&paths.completion_entry_path(request_hash), entry);
     }
 
     fn delete_completion(&self, session_id: &str, request_hash: &str) {
-        let paths = self.paths_for(session_id);
+        let paths = Self::paths_for(session_id);
         let _ = fs::remove_file(paths.completion_entry_path(request_hash));
     }
 
     fn load_state(&self, session_id: &str) -> (PromptCacheStats, Option<TrackedPromptState>) {
-        let paths = self.paths_for(session_id);
+        let paths = Self::paths_for(session_id);
         let stats = read_json::<PromptCacheStats>(&paths.stats_path).unwrap_or_default();
         let previous = read_json::<TrackedPromptState>(&paths.session_state_path);
         (stats, previous)
@@ -104,8 +104,8 @@ impl PromptCacheStore for FilePromptCacheStore {
         stats: &PromptCacheStats,
         previous: Option<&TrackedPromptState>,
     ) {
-        let paths = self.paths_for(session_id);
-        self.ensure_dirs(&paths);
+        let paths = Self::paths_for(session_id);
+        Self::ensure_dirs(&paths);
         let _ = write_json(&paths.stats_path, stats);
         if let Some(previous) = previous {
             let _ = write_json(&paths.session_state_path, previous);

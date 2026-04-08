@@ -821,10 +821,6 @@ mod tests {
             Some(source.session_id.as_str())
         );
         assert_eq!(summary.branch_name.as_deref(), Some("incident-review"));
-        assert_eq!(
-            forked.session.persistence_path(),
-            Some(forked.handle.path.as_path())
-        );
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 

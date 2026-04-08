@@ -213,13 +213,10 @@ impl AgentStore for FileAgentStore {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            match fs::read_to_string(&path) {
-                Ok(contents) => {
-                    if let Ok(manifest) = serde_json::from_str::<AgentManifest>(&contents) {
-                        agents.push(manifest);
-                    }
+            if let Ok(contents) = fs::read_to_string(&path) {
+                if let Ok(manifest) = serde_json::from_str::<AgentManifest>(&contents) {
+                    agents.push(manifest);
                 }
-                Err(_) => continue,
             }
         }
         agents.sort_by(|a, b| b.created_at.cmp(&a.created_at));
