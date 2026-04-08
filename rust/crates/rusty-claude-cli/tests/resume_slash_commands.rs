@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use runtime::ContentBlock;
 use runtime::Session;
+use runtime::SessionStore;
 use serde_json::Value;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -180,8 +181,12 @@ fn resume_latest_restores_the_most_recent_managed_session() {
     // given
     let temp_dir = unique_temp_dir("resume-latest");
     let project_dir = temp_dir.join("project");
-    let sessions_dir = project_dir.join(".claw").join("sessions");
-    fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+    fs::create_dir_all(&project_dir).expect("project dir should exist");
+
+    // Use SessionStore to get the fingerprinted sessions directory that the
+    // binary will look in when resolving "latest".
+    let store = SessionStore::from_cwd(&project_dir).expect("store should build");
+    let sessions_dir = store.sessions_dir().to_path_buf();
 
     let older_path = sessions_dir.join("session-older.jsonl");
     let newer_path = sessions_dir.join("session-newer.jsonl");
@@ -189,18 +194,21 @@ fn resume_latest_restores_the_most_recent_managed_session() {
     let mut older = Session::new().with_persistence_path(&older_path);
     older
         .push_user_text("older session")
-        .expect("older session write should succeed");
+        .expect("older push should succeed");
     older
         .save_to_path(&older_path)
         .expect("older session should persist");
 
+    // Ensure the newer session gets a later mtime so "latest" resolves correctly.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
     let mut newer = Session::new().with_persistence_path(&newer_path);
     newer
         .push_user_text("newer session")
-        .expect("newer session write should succeed");
+        .expect("newer push should succeed");
     newer
         .push_user_text("resume me")
-        .expect("newer session write should succeed");
+        .expect("newer push should succeed");
     newer
         .save_to_path(&newer_path)
         .expect("newer session should persist");

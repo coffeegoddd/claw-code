@@ -10,6 +10,7 @@ use crate::sandbox::{FilesystemIsolationMode, SandboxConfig};
 pub const CLAW_SETTINGS_SCHEMA_NAME: &str = "SettingsSchema";
 
 /// Top-level settings keys recognized by the runtime configuration loader.
+#[allow(dead_code)]
 const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "$schema",
     "enabledPlugins",
@@ -25,6 +26,7 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
 ];
 
 /// Deprecated top-level keys mapped to their replacement guidance.
+#[allow(dead_code)]
 const DEPRECATED_TOP_LEVEL_KEYS: &[(&str, &str)] = &[
     ("allowedTools", "permissions.allow"),
     ("ignorePatterns", "permissions.deny"),
@@ -929,8 +931,10 @@ fn parse_optional_trusted_roots(root: &JsonValue) -> Result<Vec<String>, ConfigE
     let Some(object) = root.as_object() else {
         return Ok(Vec::new());
     };
-    Ok(optional_string_array(object, "trustedRoots", "merged settings.trustedRoots")?
-        .unwrap_or_default())
+    Ok(
+        optional_string_array(object, "trustedRoots", "merged settings.trustedRoots")?
+            .unwrap_or_default(),
+    )
 }
 
 fn parse_filesystem_mode_label(value: &str) -> Result<FilesystemIsolationMode, ConfigError> {
