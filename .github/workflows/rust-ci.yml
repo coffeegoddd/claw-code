@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'db/**'
       - 'gaebal/**'
       - 'omx-issue-*'
     paths:
@@ -64,9 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - name: Install toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -78,7 +78,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -90,11 +91,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Install toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
       - name: Run workspace clippy
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
