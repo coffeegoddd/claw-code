@@ -75,6 +75,33 @@ pub trait SessionBackend {
 
     /// Delete a session and all associated data.
     fn delete_session(&self, session_id: &str) -> Result<(), SessionBackendError>;
+
+    /// Return a human-readable description of where sessions are stored.
+    ///
+    /// For a file backend this is the directory path; for Dolt it is a
+    /// connection URI.
+    fn storage_location(&self) -> String;
+
+    /// Return the filesystem path for a session, if the backend is file-based.
+    ///
+    /// Non-file backends return `None`.
+    fn session_path(&self, _session_id: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Return the most recently modified session.
+    ///
+    /// Default implementation delegates to [`list_sessions`](Self::list_sessions).
+    fn latest_session(&self) -> Result<ManagedSessionSummary, SessionBackendError> {
+        self.list_sessions()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                SessionBackendError::Format(
+                    "no managed sessions found\nStart `claw` to create a session, then rerun with `--resume latest`.".to_string(),
+                )
+            })
+    }
 }
 
 /// Errors raised by [`SessionBackend`] implementations.

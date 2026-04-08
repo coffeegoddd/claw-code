@@ -12,7 +12,8 @@ use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRun
 use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
-use crate::session::{ContentBlock, ConversationMessage, Session};
+use crate::session::{ContentBlock, ConversationMessage, Session, SessionPromptEntry};
+use crate::session_backend::SessionBackend;
 use crate::usage::{TokenUsage, UsageTracker};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
@@ -125,6 +126,7 @@ pub struct AutoCompactionEvent {
 /// Coordinates the model loop, tool execution, hooks, and session updates.
 pub struct ConversationRuntime<C, T> {
     session: Session,
+    backend: Option<Box<dyn SessionBackend>>,
     api_client: C,
     tool_executor: T,
     permission_policy: PermissionPolicy,
@@ -174,6 +176,7 @@ where
         let usage_tracker = UsageTracker::from_session(&session);
         Self {
             session,
+            backend: None,
             api_client,
             tool_executor,
             permission_policy,
@@ -186,6 +189,14 @@ where
             hook_progress_reporter: None,
             session_tracer: None,
         }
+    }
+
+    /// Set the session backend for persistence. When set, message appends and
+    /// prompt entries are persisted via the backend after in-memory updates.
+    #[must_use]
+    pub fn with_backend(mut self, backend: Box<dyn SessionBackend>) -> Self {
+        self.backend = Some(backend);
+        self
     }
 
     #[must_use]
@@ -300,9 +311,15 @@ where
     ) -> Result<TurnSummary, RuntimeError> {
         let user_input = user_input.into();
         self.record_turn_started(&user_input);
-        self.session
-            .push_user_text(user_input)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        self.session.push_user_text(&user_input);
+        if let Some(backend) = &self.backend {
+            backend
+                .append_message(
+                    &self.session.session_id,
+                    self.session.messages.last().expect("user message was just pushed"),
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+        }
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -358,9 +375,12 @@ where
                 pending_tool_uses.len(),
             );
 
-            self.session
-                .push_message(assistant_message.clone())
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            self.session.push_message(assistant_message.clone());
+            if let Some(backend) = &self.backend {
+                backend
+                    .append_message(&self.session.session_id, &assistant_message)
+                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+            }
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
@@ -461,9 +481,12 @@ where
                         true,
                     ),
                 };
-                self.session
-                    .push_message(result_message.clone())
-                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                self.session.push_message(result_message.clone());
+                if let Some(backend) = &self.backend {
+                    backend
+                        .append_message(&self.session.session_id, &result_message)
+                        .map_err(|error| RuntimeError::new(error.to_string()))?;
+                }
                 self.record_tool_finished(iterations, &result_message);
                 tool_results.push(result_message);
             }
@@ -1399,7 +1422,7 @@ mod tests {
         }
 
         let path = temp_session_path("persisted-turn");
-        let session = Session::new().with_persistence_path(path.clone());
+        let session = Session::new();
         let mut runtime = ConversationRuntime::new(
             session,
             SimpleApi,
@@ -1412,6 +1435,11 @@ mod tests {
             .run_turn("persist this turn", None)
             .expect("turn should succeed");
 
+        // Save via convenience method and reload to verify round-trip.
+        runtime
+            .session()
+            .save_to_path(&path)
+            .expect("session should save");
         let restored = Session::load_from_path(&path).expect("persisted session should reload");
         fs::remove_file(&path).expect("temp session file should be removable");
 
@@ -1424,9 +1452,7 @@ mod tests {
     #[test]
     fn forks_runtime_session_without_mutating_original() {
         let mut session = Session::new();
-        session
-            .push_user_text("branch me")
-            .expect("message should append");
+        session.push_user_text("branch me");
 
         let runtime = ConversationRuntime::new(
             session.clone(),

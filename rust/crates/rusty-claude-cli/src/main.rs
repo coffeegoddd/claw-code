@@ -59,10 +59,11 @@ use runtime::{
     parse_oauth_callback_request_target, pricing_for_model, resolve_expected_base,
     resolve_sandbox_status, save_oauth_credentials, ApiClient, ApiRequest, AssistantEvent,
     CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage,
-    ConversationRuntime, McpServer, McpServerManager, McpServerSpec, McpTool, MessageRole,
-    ModelPricing, OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest,
-    PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode,
-    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    ConversationRuntime, ManagedSessionSummary, McpServer, McpServerManager, McpServerSpec,
+    McpTool, MessageRole, ModelPricing, OAuthAuthorizationRequest, OAuthConfig,
+    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext,
+    PromptCacheEvent, ResolvedPermissionMode, RuntimeError, Session, SessionBackend,
+    SessionBackendError, SessionStore, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -85,10 +86,9 @@ const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const POST_TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(10);
-const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
-const LEGACY_SESSION_EXTENSION: &str = "json";
-const LATEST_SESSION_REFERENCE: &str = "latest";
-const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
+use runtime::session_control::{
+    LATEST_SESSION_REFERENCE, PRIMARY_SESSION_EXTENSION,
+};
 const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--help",
     "-h",
@@ -2080,23 +2080,45 @@ fn version_json_value() -> serde_json::Value {
 }
 
 fn resume_session(session_path: &Path, commands: &[String], output_format: CliOutputFormat) {
-    let resolved_path = if session_path.exists() {
-        session_path.to_path_buf()
-    } else {
-        match resolve_session_reference(&session_path.display().to_string()) {
-            Ok(handle) => handle.path,
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("failed to determine working directory: {error}");
+            std::process::exit(1);
+        }
+    };
+    let backend: Box<dyn SessionBackend> = match SessionStore::from_cwd(&cwd) {
+        Ok(store) => Box::new(store),
+        Err(error) => {
+            eprintln!("failed to initialize session backend: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    // If the path exists on disk, load it directly; otherwise resolve via
+    // the backend (handles aliases like "latest" and managed session IDs).
+    let (resolved_path, session) = if session_path.exists() {
+        let p = session_path.to_path_buf();
+        match Session::load_from_path(&p) {
+            Ok(s) => (p, s),
             Err(error) => {
                 eprintln!("failed to restore session: {error}");
                 std::process::exit(1);
             }
         }
-    };
-
-    let session = match Session::load_from_path(&resolved_path) {
-        Ok(session) => session,
-        Err(error) => {
-            eprintln!("failed to restore session: {error}");
-            std::process::exit(1);
+    } else {
+        let reference = session_path.display().to_string();
+        match backend.resolve_reference(&reference).and_then(|id| {
+            let path = backend
+                .session_path(&id)
+                .unwrap_or_else(|| PathBuf::from(&id));
+            backend.load_session(&id).map(|s| (path, s))
+        }) {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!("failed to restore session: {error}");
+                std::process::exit(1);
+            }
         }
     };
 
@@ -2808,29 +2830,14 @@ fn run_repl(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct SessionHandle {
-    id: String,
-    path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct ManagedSessionSummary {
-    id: String,
-    path: PathBuf,
-    modified_epoch_millis: u128,
-    message_count: usize,
-    parent_session_id: Option<String>,
-    branch_name: Option<String>,
-}
-
 struct LiveCli {
     model: String,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     system_prompt: Vec<String>,
     runtime: BuiltRuntime,
-    session: SessionHandle,
+    session_id: String,
+    backend: Box<dyn SessionBackend>,
     prompt_history: Vec<PromptHistoryEntry>,
 }
 
@@ -3318,12 +3325,17 @@ impl LiveCli {
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let backend: Box<dyn SessionBackend> = Box::new(
+            SessionStore::from_cwd(&cwd)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+        );
         let system_prompt = build_system_prompt()?;
         let session_state = Session::new();
-        let session = create_managed_session_handle(&session_state.session_id)?;
+        let session_id = session_state.session_id.clone();
         let runtime = build_runtime(
-            session_state.with_persistence_path(session.path.clone()),
-            &session.id,
+            session_state,
+            &session_id,
             model.clone(),
             system_prompt.clone(),
             enable_tools,
@@ -3331,6 +3343,7 @@ impl LiveCli {
             allowed_tools.clone(),
             permission_mode,
             None,
+            &*backend,
         )?;
         let cli = Self {
             model,
@@ -3338,7 +3351,8 @@ impl LiveCli {
             permission_mode,
             system_prompt,
             runtime,
-            session,
+            session_id,
+            backend,
             prompt_history: Vec::new(),
         };
         cli.persist_session()?;
@@ -3359,10 +3373,15 @@ impl LiveCli {
             || "unknown".to_string(),
             |context| context.git_summary.headline(),
         );
-        let session_path = self.session.path.strip_prefix(Path::new(&cwd)).map_or_else(
-            |_| self.session.path.display().to_string(),
-            |path| path.display().to_string(),
-        );
+        let session_path = self
+            .backend
+            .session_path(&self.session_id)
+            .map(|p| {
+                p.strip_prefix(Path::new(&cwd))
+                    .map(|rel| rel.display().to_string())
+                    .unwrap_or_else(|_| p.display().to_string())
+            })
+            .unwrap_or_else(|| self.backend.storage_location());
         format!(
             "\x1b[38;5;196m\
  ██████╗██╗      █████╗ ██╗    ██╗\n\
@@ -3384,7 +3403,7 @@ impl LiveCli {
             git_branch,
             workspace,
             cwd,
-            self.session.id,
+            self.session_id,
             session_path,
         )
     }
@@ -3392,8 +3411,10 @@ impl LiveCli {
     fn repl_completion_candidates(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         Ok(slash_command_completion_candidates_with_sessions(
             &self.model,
-            Some(&self.session.id),
-            list_managed_sessions()?
+            Some(&self.session_id),
+            self.backend
+                .list_sessions()
+                .unwrap_or_default()
                 .into_iter()
                 .map(|session| session.id)
                 .collect(),
@@ -3407,7 +3428,7 @@ impl LiveCli {
         let hook_abort_signal = runtime::HookAbortSignal::new();
         let runtime = build_runtime(
             self.runtime.session().clone(),
-            &self.session.id,
+            &self.session_id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -3415,6 +3436,7 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             None,
+            &*self.backend,
         )?
         .with_hook_abort_signal(hook_abort_signal.clone());
         let hook_abort_monitor = HookAbortMonitor::spawn(hook_abort_signal);
@@ -3703,13 +3725,16 @@ impl LiveCli {
     }
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.session().save_to_path(&self.session.path)?;
+        self.backend
+            .save_snapshot(self.runtime.session())
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         Ok(())
     }
 
     fn print_status(&self) {
         let cumulative = self.runtime.usage().cumulative_usage();
         let latest = self.runtime.usage().current_turn_usage();
+        let session_path = self.backend.session_path(&self.session_id);
         println!(
             "{}",
             format_status_report(
@@ -3722,7 +3747,7 @@ impl LiveCli {
                     estimated_tokens: self.runtime.estimated_tokens(),
                 },
                 self.permission_mode.as_str(),
-                &status_context(Some(&self.session.path)).expect("status context should load"),
+                &status_context(session_path.as_deref()).expect("status context should load"),
             )
         );
     }
@@ -3739,9 +3764,7 @@ impl LiveCli {
             text: prompt.to_string(),
         };
         self.prompt_history.push(entry);
-        if let Err(error) = self.runtime.session_mut().push_prompt_entry(prompt) {
-            eprintln!("warning: failed to persist prompt history: {error}");
-        }
+        self.runtime.session_mut().push_prompt_entry(prompt);
     }
 
     fn print_prompt_history(&self, count: Option<&str>) {
@@ -3821,7 +3844,7 @@ impl LiveCli {
         let message_count = session.messages.len();
         let runtime = build_runtime(
             session,
-            &self.session.id,
+            &self.session_id,
             model.clone(),
             self.system_prompt.clone(),
             true,
@@ -3829,6 +3852,7 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             None,
+            &*self.backend,
         )?;
         self.replace_runtime(runtime)?;
         self.model.clone_from(&model);
@@ -3867,7 +3891,7 @@ impl LiveCli {
         self.permission_mode = permission_mode_from_label(normalized);
         let runtime = build_runtime(
             session,
-            &self.session.id,
+            &self.session_id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -3875,6 +3899,7 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             None,
+            &*self.backend,
         )?;
         self.replace_runtime(runtime)?;
         println!(
@@ -3892,12 +3917,12 @@ impl LiveCli {
             return Ok(false);
         }
 
-        let previous_session = self.session.clone();
+        let previous_session_id = self.session_id.clone();
         let session_state = Session::new();
-        self.session = create_managed_session_handle(&session_state.session_id)?;
+        let new_session_id = session_state.session_id.clone();
         let runtime = build_runtime(
-            session_state.with_persistence_path(self.session.path.clone()),
-            &self.session.id,
+            session_state,
+            &new_session_id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -3905,16 +3930,23 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             None,
+            &*self.backend,
         )?;
+        self.session_id = new_session_id;
         self.replace_runtime(runtime)?;
+        let session_path_display = self
+            .backend
+            .session_path(&self.session_id)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| self.backend.storage_location());
         println!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
-            previous_session.id,
-            previous_session.id,
+            previous_session_id,
+            previous_session_id,
             self.model,
             self.permission_mode.as_str(),
-            self.session.id,
-            self.session.path.display(),
+            self.session_id,
+            session_path_display,
         );
         Ok(true)
     }
@@ -3933,13 +3965,19 @@ impl LiveCli {
             return Ok(false);
         };
 
-        let handle = resolve_session_reference(&session_ref)?;
-        let session = Session::load_from_path(&handle.path)?;
+        let resolved_id = self
+            .backend
+            .resolve_reference(&session_ref)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let session = self
+            .backend
+            .load_session(&resolved_id)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         let message_count = session.messages.len();
         let session_id = session.session_id.clone();
         let runtime = build_runtime(
             session,
-            &handle.id,
+            &session_id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -3947,16 +3985,19 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             None,
+            &*self.backend,
         )?;
         self.replace_runtime(runtime)?;
-        self.session = SessionHandle {
-            id: session_id,
-            path: handle.path,
-        };
+        self.session_id = session_id;
+        let path_display = self
+            .backend
+            .session_path(&self.session_id)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| self.backend.storage_location());
         println!(
             "{}",
             format_resume_report(
-                &self.session.path.display().to_string(),
+                &path_display,
                 message_count,
                 self.runtime.usage().turns(),
             )
@@ -4081,7 +4122,7 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         match action {
             None | Some("list") => {
-                println!("{}", render_session_list(&self.session.id)?);
+                println!("{}", render_session_list(&self.session_id, &*self.backend)?);
                 Ok(false)
             }
             Some("switch") => {
@@ -4089,13 +4130,19 @@ impl LiveCli {
                     println!("Usage: /session switch <session-id>");
                     return Ok(false);
                 };
-                let handle = resolve_session_reference(target)?;
-                let session = Session::load_from_path(&handle.path)?;
+                let resolved_id = self
+                    .backend
+                    .resolve_reference(target)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                let session = self
+                    .backend
+                    .load_session(&resolved_id)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 let message_count = session.messages.len();
                 let session_id = session.session_id.clone();
                 let runtime = build_runtime(
                     session,
-                    &handle.id,
+                    &session_id,
                     self.model.clone(),
                     self.system_prompt.clone(),
                     true,
@@ -4103,34 +4150,38 @@ impl LiveCli {
                     self.allowed_tools.clone(),
                     self.permission_mode,
                     None,
+                    &*self.backend,
                 )?;
                 self.replace_runtime(runtime)?;
-                self.session = SessionHandle {
-                    id: session_id,
-                    path: handle.path,
-                };
+                self.session_id = session_id;
+                let path_display = self
+                    .backend
+                    .session_path(&self.session_id)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| self.backend.storage_location());
                 println!(
                     "Session switched\n  Active session   {}\n  File             {}\n  Messages         {}",
-                    self.session.id,
-                    self.session.path.display(),
+                    self.session_id,
+                    path_display,
                     message_count,
                 );
                 Ok(true)
             }
             Some("fork") => {
                 let forked = self.runtime.fork_session(target.map(ToOwned::to_owned));
-                let parent_session_id = self.session.id.clone();
-                let handle = create_managed_session_handle(&forked.session_id)?;
+                let parent_session_id = self.session_id.clone();
                 let branch_name = forked
                     .fork
                     .as_ref()
                     .and_then(|fork| fork.branch_name.clone());
-                let forked = forked.with_persistence_path(handle.path.clone());
+                let forked_id = forked.session_id.clone();
                 let message_count = forked.messages.len();
-                forked.save_to_path(&handle.path)?;
+                self.backend
+                    .create_session(&forked)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 let runtime = build_runtime(
                     forked,
-                    &handle.id,
+                    &forked_id,
                     self.model.clone(),
                     self.system_prompt.clone(),
                     true,
@@ -4138,15 +4189,21 @@ impl LiveCli {
                     self.allowed_tools.clone(),
                     self.permission_mode,
                     None,
+                    &*self.backend,
                 )?;
                 self.replace_runtime(runtime)?;
-                self.session = handle;
+                self.session_id = forked_id;
+                let path_display = self
+                    .backend
+                    .session_path(&self.session_id)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| self.backend.storage_location());
                 println!(
                     "Session forked\n  Parent session   {}\n  Active session   {}\n  Branch           {}\n  File             {}\n  Messages         {}",
                     parent_session_id,
-                    self.session.id,
+                    self.session_id,
                     branch_name.as_deref().unwrap_or("(unnamed)"),
-                    self.session.path.display(),
+                    path_display,
                     message_count,
                 );
                 Ok(true)
@@ -4156,23 +4213,31 @@ impl LiveCli {
                     println!("Usage: /session delete <session-id> [--force]");
                     return Ok(false);
                 };
-                let handle = resolve_session_reference(target)?;
-                if handle.id == self.session.id {
+                let resolved_id = self
+                    .backend
+                    .resolve_reference(target)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                if resolved_id == self.session_id {
                     println!(
-                        "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
-                        handle.id
+                        "delete: refusing to delete the active session '{resolved_id}'.\nSwitch to another session first with /session switch <session-id>.",
                     );
                     return Ok(false);
                 }
-                if !confirm_session_deletion(&handle.id) {
+                if !confirm_session_deletion(&resolved_id) {
                     println!("delete: cancelled.");
                     return Ok(false);
                 }
-                delete_managed_session(&handle.path)?;
+                let path_display = self
+                    .backend
+                    .session_path(&resolved_id)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| self.backend.storage_location());
+                self.backend
+                    .delete_session(&resolved_id)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 println!(
                     "Session deleted\n  Deleted session  {}\n  File             {}",
-                    handle.id,
-                    handle.path.display(),
+                    resolved_id, path_display,
                 );
                 Ok(false)
             }
@@ -4181,19 +4246,27 @@ impl LiveCli {
                     println!("Usage: /session delete <session-id> [--force]");
                     return Ok(false);
                 };
-                let handle = resolve_session_reference(target)?;
-                if handle.id == self.session.id {
+                let resolved_id = self
+                    .backend
+                    .resolve_reference(target)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                if resolved_id == self.session_id {
                     println!(
-                        "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
-                        handle.id
+                        "delete: refusing to delete the active session '{resolved_id}'.\nSwitch to another session first with /session switch <session-id>.",
                     );
                     return Ok(false);
                 }
-                delete_managed_session(&handle.path)?;
+                let path_display = self
+                    .backend
+                    .session_path(&resolved_id)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| self.backend.storage_location());
+                self.backend
+                    .delete_session(&resolved_id)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 println!(
                     "Session deleted\n  Deleted session  {}\n  File             {}",
-                    handle.id,
-                    handle.path.display(),
+                    resolved_id, path_display,
                 );
                 Ok(false)
             }
@@ -4226,7 +4299,7 @@ impl LiveCli {
     fn reload_runtime_features(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let runtime = build_runtime(
             self.runtime.session().clone(),
-            &self.session.id,
+            &self.session_id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -4234,6 +4307,7 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             None,
+            &*self.backend,
         )?;
         self.replace_runtime(runtime)?;
         self.persist_session()
@@ -4246,7 +4320,7 @@ impl LiveCli {
         let skipped = removed == 0;
         let runtime = build_runtime(
             result.compacted_session,
-            &self.session.id,
+            &self.session_id,
             self.model.clone(),
             self.system_prompt.clone(),
             true,
@@ -4254,6 +4328,7 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             None,
+            &*self.backend,
         )?;
         self.replace_runtime(runtime)?;
         self.persist_session()?;
@@ -4270,7 +4345,7 @@ impl LiveCli {
         let session = self.runtime.session().clone();
         let mut runtime = build_runtime(
             session,
-            &self.session.id,
+            &self.session_id,
             self.model.clone(),
             self.system_prompt.clone(),
             enable_tools,
@@ -4278,6 +4353,7 @@ impl LiveCli {
             self.allowed_tools.clone(),
             self.permission_mode,
             progress,
+            &*self.backend,
         )?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let summary = runtime.run_turn(prompt, Some(&mut permission_prompter))?;
@@ -4350,149 +4426,6 @@ impl LiveCli {
     }
 }
 
-fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
-    let store = runtime::SessionStore::from_cwd(&cwd)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    Ok(store.sessions_dir().to_path_buf())
-}
-
-fn create_managed_session_handle(
-    session_id: &str,
-) -> Result<SessionHandle, Box<dyn std::error::Error>> {
-    let id = session_id.to_string();
-    let path = sessions_dir()?.join(format!("{id}.{PRIMARY_SESSION_EXTENSION}"));
-    Ok(SessionHandle { id, path })
-}
-
-fn resolve_session_reference(reference: &str) -> Result<SessionHandle, Box<dyn std::error::Error>> {
-    if SESSION_REFERENCE_ALIASES
-        .iter()
-        .any(|alias| reference.eq_ignore_ascii_case(alias))
-    {
-        let latest = latest_managed_session()?;
-        return Ok(SessionHandle {
-            id: latest.id,
-            path: latest.path,
-        });
-    }
-
-    let direct = PathBuf::from(reference);
-    let looks_like_path = direct.extension().is_some() || direct.components().count() > 1;
-    let path = if direct.exists() {
-        direct
-    } else if looks_like_path {
-        return Err(format_missing_session_reference(reference).into());
-    } else {
-        resolve_managed_session_path(reference)?
-    };
-    let id = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .and_then(|name| {
-            name.strip_suffix(&format!(".{PRIMARY_SESSION_EXTENSION}"))
-                .or_else(|| name.strip_suffix(&format!(".{LEGACY_SESSION_EXTENSION}")))
-        })
-        .unwrap_or(reference)
-        .to_string();
-    Ok(SessionHandle { id, path })
-}
-
-fn resolve_managed_session_path(session_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let directory = sessions_dir()?;
-    for extension in [PRIMARY_SESSION_EXTENSION, LEGACY_SESSION_EXTENSION] {
-        let path = directory.join(format!("{session_id}.{extension}"));
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    Err(format_missing_session_reference(session_id).into())
-}
-
-fn is_managed_session_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|extension| {
-            extension == PRIMARY_SESSION_EXTENSION || extension == LEGACY_SESSION_EXTENSION
-        })
-}
-
-fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
-    let mut sessions = Vec::new();
-    for entry in fs::read_dir(sessions_dir()?)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !is_managed_session_file(&path) {
-            continue;
-        }
-        let metadata = entry.metadata()?;
-        let modified_epoch_millis = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis())
-            .unwrap_or_default();
-        let (id, message_count, parent_session_id, branch_name) =
-            match Session::load_from_path(&path) {
-                Ok(session) => {
-                    let parent_session_id = session
-                        .fork
-                        .as_ref()
-                        .map(|fork| fork.parent_session_id.clone());
-                    let branch_name = session
-                        .fork
-                        .as_ref()
-                        .and_then(|fork| fork.branch_name.clone());
-                    (
-                        session.session_id,
-                        session.messages.len(),
-                        parent_session_id,
-                        branch_name,
-                    )
-                }
-                Err(_) => (
-                    path.file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    0,
-                    None,
-                    None,
-                ),
-            };
-        sessions.push(ManagedSessionSummary {
-            id,
-            path,
-            modified_epoch_millis,
-            message_count,
-            parent_session_id,
-            branch_name,
-        });
-    }
-    sessions.sort_by(|left, right| {
-        right
-            .modified_epoch_millis
-            .cmp(&left.modified_epoch_millis)
-            .then_with(|| right.id.cmp(&left.id))
-    });
-    Ok(sessions)
-}
-
-fn latest_managed_session() -> Result<ManagedSessionSummary, Box<dyn std::error::Error>> {
-    list_managed_sessions()?
-        .into_iter()
-        .next()
-        .ok_or_else(|| format_no_managed_sessions().into())
-}
-
-fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if !path.exists() {
-        return Err(format!("session file does not exist: {}", path.display()).into());
-    }
-    fs::remove_file(path)?;
-    Ok(())
-}
-
 fn confirm_session_deletion(session_id: &str) -> bool {
     print!("Delete session '{session_id}'? This cannot be undone. [y/N]: ");
     io::stdout().flush().unwrap_or(());
@@ -4503,23 +4436,17 @@ fn confirm_session_deletion(session_id: &str) -> bool {
     matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES")
 }
 
-fn format_missing_session_reference(reference: &str) -> String {
-    format!(
-        "session not found: {reference}\nHint: managed sessions live in .claw/sessions/. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
-    )
-}
 
-fn format_no_managed_sessions() -> String {
-    format!(
-        "no managed sessions found in .claw/sessions/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
-    )
-}
-
-fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let sessions = list_managed_sessions()?;
+fn render_session_list(
+    active_session_id: &str,
+    backend: &dyn SessionBackend,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let sessions = backend
+        .list_sessions()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     let mut lines = vec![
         "Sessions".to_string(),
-        format!("  Directory         {}", sessions_dir()?.display()),
+        format!("  Directory         {}", backend.storage_location()),
     ];
     if sessions.is_empty() {
         lines.push("  No managed sessions saved yet.".to_string());
@@ -5592,16 +5519,28 @@ fn run_export(
     output_path: Option<&Path>,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let handle = resolve_session_reference(session_reference)?;
-    let session = Session::load_from_path(&handle.path)?;
-    let markdown = render_session_markdown(&session, &handle.id, &handle.path);
+    let cwd = env::current_dir()?;
+    let backend: Box<dyn SessionBackend> = Box::new(
+        SessionStore::from_cwd(&cwd)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+    );
+    let resolved_id = backend
+        .resolve_reference(session_reference)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    let session = backend
+        .load_session(&resolved_id)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    let session_path = backend
+        .session_path(&resolved_id)
+        .unwrap_or_else(|| PathBuf::from(&resolved_id));
+    let markdown = render_session_markdown(&session, &resolved_id, &session_path);
 
     if let Some(path) = output_path {
         fs::write(path, &markdown)?;
         let report = format!(
             "Export\n  Result           wrote markdown transcript\n  File             {}\n  Session          {}\n  Messages         {}",
             path.display(),
-            handle.id,
+            resolved_id,
             session.messages.len(),
         );
         match output_format {
@@ -5611,7 +5550,7 @@ fn run_export(
                 serde_json::to_string_pretty(&json!({
                     "kind": "export",
                     "message": report,
-                    "session_id": handle.id,
+                    "session_id": resolved_id,
                     "file": path.display().to_string(),
                     "messages": session.messages.len(),
                 }))?
@@ -5631,8 +5570,8 @@ fn run_export(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "kind": "export",
-                "session_id": handle.id,
-                "file": handle.path.display().to_string(),
+                "session_id": resolved_id,
+                "file": session_path.display().to_string(),
                 "messages": session.messages.len(),
                 "markdown": markdown,
             }))?
@@ -6164,6 +6103,7 @@ fn build_runtime(
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     progress_reporter: Option<InternalPromptProgressReporter>,
+    _backend: &dyn SessionBackend,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     let runtime_plugin_state = build_runtime_plugin_state()?;
     build_runtime_with_plugin_state(
@@ -7735,7 +7675,7 @@ fn print_help(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::
 mod tests {
     use super::{
         build_runtime_plugin_state_with_loader, build_runtime_with_plugin_state,
-        collect_session_prompt_history, create_managed_session_handle, describe_tool_progress,
+        collect_session_prompt_history, describe_tool_progress,
         filter_tool_specs, format_bughunter_report, format_commit_preflight_report,
         format_commit_skipped_report, format_compact_report, format_connected_line,
         format_cost_report, format_history_timestamp, format_internal_prompt_progress_line,
@@ -7744,19 +7684,18 @@ mod tests {
         format_resume_report, format_status_report, format_tool_call_start, format_tool_result,
         format_ultraplan_report, format_unknown_slash_command,
         format_unknown_slash_command_message, format_user_visible_api_error,
-        merge_prompt_with_stdin, normalize_permission_mode, parse_args, parse_export_args,
-        parse_git_status_branch, parse_git_status_metadata_for, parse_git_workspace_summary,
-        parse_history_count, permission_policy, print_help_to, push_output_block,
-        render_config_report, render_diff_report, render_diff_report_for, render_memory_report,
-        render_prompt_history_report, render_repl_help, render_resume_usage,
-        render_session_markdown, resolve_model_alias, resolve_model_alias_with_config,
-        resolve_repl_model, resolve_session_reference, response_to_events,
-        resume_supported_slash_commands, run_resume_command, sessions_dir, short_tool_id,
-        slash_command_completion_candidates_with_sessions, status_context,
-        summarize_tool_payload_for_markdown, validate_no_args, write_mcp_server_fixture, CliAction,
-        CliOutputFormat, CliToolExecutor, GitWorkspaceSummary, InternalPromptProgressEvent,
-        InternalPromptProgressState, LiveCli, LocalHelpTopic, PromptHistoryEntry, SlashCommand,
-        StatusUsage, DEFAULT_MODEL, LATEST_SESSION_REFERENCE,
+        merge_prompt_with_stdin, normalize_permission_mode, parse_args, parse_git_status_branch,
+        parse_git_status_metadata_for, parse_git_workspace_summary, permission_policy,
+        print_help_to, push_output_block, render_config_report, render_diff_report,
+        render_diff_report_for, render_memory_report, render_repl_help, render_resume_usage,
+        resolve_model_alias, resolve_model_alias_with_config, resolve_repl_model,
+        response_to_events, resume_supported_slash_commands,
+        run_resume_command, slash_command_completion_candidates_with_sessions, status_context,
+        validate_no_args, write_mcp_server_fixture, CliAction, CliOutputFormat, CliToolExecutor,
+        GitWorkspaceSummary, InternalPromptProgressEvent, InternalPromptProgressState, LiveCli,
+        LocalHelpTopic, SlashCommand, StatusUsage, DEFAULT_MODEL, LATEST_SESSION_REFERENCE,
+        PromptHistoryEntry, render_prompt_history_report, parse_history_count,
+        parse_export_args, render_session_markdown, summarize_tool_payload_for_markdown, short_tool_id,
     };
     use api::{ApiError, MessageResponse, OutputContentBlock, Usage};
     use plugins::{
@@ -7764,7 +7703,8 @@ mod tests {
     };
     use runtime::{
         load_oauth_credentials, save_oauth_credentials, AssistantEvent, ConfigLoader, ContentBlock,
-        ConversationMessage, MessageRole, OAuthConfig, PermissionMode, Session, ToolExecutor,
+        ConversationMessage, MessageRole, OAuthConfig, PermissionMode, Session, SessionBackend,
+        SessionStore, ToolExecutor,
     };
     use serde_json::json;
     use std::fs;
@@ -9961,14 +9901,14 @@ UU conflicted.rs",
 
     #[test]
     fn managed_sessions_default_to_jsonl_and_resolve_legacy_json() {
-        let _guard = cwd_lock().lock().expect("cwd lock");
         let workspace = temp_workspace("session-resolution");
         std::fs::create_dir_all(&workspace).expect("workspace should create");
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&workspace).expect("switch cwd");
 
-        let handle = create_managed_session_handle("session-alpha").expect("jsonl handle");
-        assert!(handle.path.ends_with("session-alpha.jsonl"));
+        let backend = SessionStore::from_cwd(&workspace).expect("backend should build");
+        let session_path = backend
+            .session_path("session-alpha")
+            .expect("file backend should return a path");
+        assert!(session_path.ends_with("session-alpha.jsonl"));
 
         // Save the legacy session inside the fingerprinted sessions directory
         // so that resolve_session_reference can find it.
@@ -9979,53 +9919,41 @@ UU conflicted.rs",
             .save_to_path(&legacy_path)
             .expect("legacy session should save");
 
-        let resolved = resolve_session_reference("legacy").expect("legacy session should resolve");
-        assert_eq!(
-            resolved
-                .path
-                .canonicalize()
-                .expect("resolved path should exist"),
-            legacy_path
-                .canonicalize()
-                .expect("legacy path should exist")
-        );
+        let resolved_id = backend
+            .resolve_reference("legacy")
+            .expect("legacy session should resolve via backend");
+        assert_eq!(resolved_id, "legacy");
 
-        std::env::set_current_dir(previous).expect("restore cwd");
         std::fs::remove_dir_all(workspace).expect("workspace should clean up");
     }
 
     #[test]
     fn latest_session_alias_resolves_most_recent_managed_session() {
-        let _guard = cwd_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let workspace = temp_workspace("latest-session-alias");
         std::fs::create_dir_all(&workspace).expect("workspace should create");
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&workspace).expect("switch cwd");
 
-        let older = create_managed_session_handle("session-older").expect("older handle");
+        let backend = SessionStore::from_cwd(&workspace).expect("backend should build");
+        let older_path = backend
+            .session_path("session-older")
+            .expect("file backend should return a path");
         Session::new()
-            .with_persistence_path(older.path.clone())
-            .save_to_path(&older.path)
+            .with_persistence_path(older_path.clone())
+            .save_to_path(&older_path)
             .expect("older session should save");
         std::thread::sleep(Duration::from_millis(20));
-        let newer = create_managed_session_handle("session-newer").expect("newer handle");
+        let newer_path = backend
+            .session_path("session-newer")
+            .expect("file backend should return a path");
         Session::new()
-            .with_persistence_path(newer.path.clone())
-            .save_to_path(&newer.path)
+            .with_persistence_path(newer_path.clone())
+            .save_to_path(&newer_path)
             .expect("newer session should save");
 
-        let resolved = resolve_session_reference("latest").expect("latest session should resolve");
-        assert_eq!(
-            resolved
-                .path
-                .canonicalize()
-                .expect("resolved path should exist"),
-            newer.path.canonicalize().expect("newer path should exist")
-        );
+        let resolved_id = backend
+            .resolve_reference("latest")
+            .expect("latest session should resolve via backend");
+        assert_eq!(resolved_id, "session-newer");
 
-        std::env::set_current_dir(previous).expect("restore cwd");
         std::fs::remove_dir_all(workspace).expect("workspace should clean up");
     }
 
@@ -10261,8 +10189,8 @@ UU conflicted.rs",
     fn collect_session_prompt_history_extracts_user_text_blocks() {
         // given
         let mut session = Session::new();
-        session.push_user_text("hello").unwrap();
-        session.push_user_text("world").unwrap();
+        session.push_user_text("hello");
+        session.push_user_text("world");
 
         // when
         let entries = collect_session_prompt_history(&session);

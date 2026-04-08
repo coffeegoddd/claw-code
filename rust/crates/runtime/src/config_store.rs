@@ -16,6 +16,10 @@ pub struct ConfigLayer {
     /// The raw JSON source text, used for line-number reporting in
     /// validation diagnostics. Empty string if not available (e.g., Dolt).
     pub source_text: String,
+    /// The file path this layer was loaded from, if file-based. Used for
+    /// error messages and diagnostics. Non-file backends use a synthetic
+    /// label like `<User config>`.
+    pub path: PathBuf,
 }
 
 /// Low-level storage operations for configuration data.
@@ -170,6 +174,7 @@ fn read_config_layer(
             scope,
             object: BTreeMap::new(),
             source_text: contents,
+            path: path.to_path_buf(),
         }));
     }
 
@@ -195,5 +200,6 @@ fn read_config_layer(
         scope,
         object: object.clone(),
         source_text: contents,
+        path: path.to_path_buf(),
     }))
 }

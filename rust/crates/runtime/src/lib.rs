@@ -42,7 +42,10 @@ pub mod session_backend;
 pub mod session_control;
 pub use dolt_session_backend::DoltSessionBackend;
 pub use session_backend::{SessionBackend, SessionBackendError};
-pub use session_control::SessionStore;
+pub use session_control::{
+    ForkedManagedSession, LoadedManagedSession, ManagedSessionSummary, SessionControlError,
+    SessionHandle, SessionStore,
+};
 mod sse;
 pub mod stale_base;
 pub mod stale_branch;

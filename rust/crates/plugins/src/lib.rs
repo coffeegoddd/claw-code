@@ -869,9 +869,10 @@ impl PluginManagerConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct PluginManager {
     config: PluginManagerConfig,
+    store: std::sync::Arc<dyn PluginRegistryStore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1035,7 +1036,22 @@ impl From<serde_json::Error> for PluginError {
 impl PluginManager {
     #[must_use]
     pub fn new(config: PluginManagerConfig) -> Self {
-        Self { config }
+        let mut file_store = FilePluginRegistryStore::new(&config.config_home);
+        if let Some(ref registry_path) = config.registry_path {
+            file_store = file_store.with_registry_path(registry_path);
+        }
+        Self {
+            store: std::sync::Arc::new(file_store),
+            config,
+        }
+    }
+
+    /// Create a `PluginManager` with a custom store backend.
+    pub fn with_store(
+        config: PluginManagerConfig,
+        store: std::sync::Arc<dyn PluginRegistryStore>,
+    ) -> Self {
+        Self { config, store }
     }
 
     #[must_use]
@@ -1463,24 +1479,11 @@ impl PluginManager {
     }
 
     fn load_registry(&self) -> Result<InstalledPluginRegistry, PluginError> {
-        let path = self.registry_path();
-        match fs::read_to_string(&path) {
-            Ok(contents) if contents.trim().is_empty() => Ok(InstalledPluginRegistry::default()),
-            Ok(contents) => Ok(serde_json::from_str(&contents)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(InstalledPluginRegistry::default())
-            }
-            Err(error) => Err(PluginError::Io(error)),
-        }
+        self.store.load_registry()
     }
 
     fn store_registry(&self, registry: &InstalledPluginRegistry) -> Result<(), PluginError> {
-        let path = self.registry_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, serde_json::to_string_pretty(registry)?)?;
-        Ok(())
+        self.store.store_registry(registry)
     }
 
     fn write_enabled_state(
@@ -1488,17 +1491,7 @@ impl PluginManager {
         plugin_id: &str,
         enabled: Option<bool>,
     ) -> Result<(), PluginError> {
-        update_settings_json(&self.settings_path(), |root| {
-            let enabled_plugins = ensure_object(root, "enabledPlugins");
-            match enabled {
-                Some(value) => {
-                    enabled_plugins.insert(plugin_id.to_string(), Value::Bool(value));
-                }
-                None => {
-                    enabled_plugins.remove(plugin_id);
-                }
-            }
-        })
+        self.store.write_enabled_state(plugin_id, enabled)
     }
 
     fn installed_plugin_registry(&self) -> Result<PluginRegistry, PluginError> {

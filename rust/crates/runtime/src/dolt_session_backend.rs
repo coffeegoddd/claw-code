@@ -118,4 +118,8 @@ impl SessionBackend for DoltSessionBackend {
             "DoltSessionBackend::delete_session".to_string(),
         ))
     }
+
+    fn storage_location(&self) -> String {
+        format!("dolt://{}/{}", self.connection, self.branch)
+    }
 }

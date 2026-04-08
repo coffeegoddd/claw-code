@@ -65,4 +65,8 @@ impl AgentStore for DoltAgentStore {
             "DoltAgentStore::list_agents".to_string(),
         ))
     }
+
+    fn storage_location(&self) -> String {
+        format!("dolt://{}/{}", self.connection, self.branch)
+    }
 }

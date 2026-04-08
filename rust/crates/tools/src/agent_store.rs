@@ -10,8 +10,8 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Persisted agent manifest. Matches the on-disk `AgentOutput` struct from
-/// `tools/src/lib.rs` but with public fields for use across store backends.
+/// Persisted agent manifest. This is the single source-of-truth type for agent
+/// metadata, used across all store backends and the agent execution pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
     #[serde(rename = "agentId")]
@@ -69,6 +69,19 @@ pub trait AgentStore: Debug + Send + Sync {
     /// List all agents in the store. Returns manifests sorted by creation
     /// time descending.
     fn list_agents(&self) -> Result<Vec<AgentManifest>, AgentStoreError>;
+
+    /// Return a human-readable description of where agents are stored.
+    fn storage_location(&self) -> String;
+
+    /// Return the filesystem path for an agent's manifest, if file-based.
+    fn manifest_path(&self, _agent_id: &str) -> Option<PathBuf> {
+        None
+    }
+
+    /// Return the filesystem path for an agent's output, if file-based.
+    fn output_path(&self, _agent_id: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Errors raised by [`AgentStore`] implementations.
@@ -137,11 +150,11 @@ impl FileAgentStore {
         Self::new(dir)
     }
 
-    fn manifest_path(&self, agent_id: &str) -> PathBuf {
+    fn resolve_manifest_path(&self, agent_id: &str) -> PathBuf {
         self.store_dir.join(format!("{agent_id}.json"))
     }
 
-    fn output_path(&self, agent_id: &str) -> PathBuf {
+    fn resolve_output_path(&self, agent_id: &str) -> PathBuf {
         self.store_dir.join(format!("{agent_id}.md"))
     }
 }
@@ -150,13 +163,16 @@ impl AgentStore for FileAgentStore {
     fn create_agent(&self, manifest: &AgentManifest) -> Result<(), AgentStoreError> {
         let mut normalized = manifest.clone();
         normalized.lane_events = dedupe_superseded_commit_events(&normalized.lane_events);
+        // Populate file paths for the stored manifest.
+        normalized.manifest_file = self.resolve_manifest_path(&manifest.agent_id).display().to_string();
+        normalized.output_file = self.resolve_output_path(&manifest.agent_id).display().to_string();
         let json = serde_json::to_string_pretty(&normalized)?;
-        fs::write(self.manifest_path(&manifest.agent_id), json)?;
+        fs::write(self.resolve_manifest_path(&manifest.agent_id), json)?;
         Ok(())
     }
 
     fn load_agent(&self, agent_id: &str) -> Result<Option<AgentManifest>, AgentStoreError> {
-        let path = self.manifest_path(agent_id);
+        let path = self.resolve_manifest_path(agent_id);
         match fs::read_to_string(&path) {
             Ok(contents) => Ok(Some(serde_json::from_str(&contents)?)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -169,12 +185,12 @@ impl AgentStore for FileAgentStore {
     }
 
     fn write_output(&self, agent_id: &str, content: &str) -> Result<(), AgentStoreError> {
-        fs::write(self.output_path(agent_id), content)?;
+        fs::write(self.resolve_output_path(agent_id), content)?;
         Ok(())
     }
 
     fn append_output(&self, agent_id: &str, suffix: &str) -> Result<(), AgentStoreError> {
-        let path = self.output_path(agent_id);
+        let path = self.resolve_output_path(agent_id);
         let mut file = fs::OpenOptions::new().append(true).open(&path)?;
         file.write_all(suffix.as_bytes())?;
         Ok(())
@@ -204,6 +220,18 @@ impl AgentStore for FileAgentStore {
         }
         agents.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(agents)
+    }
+
+    fn storage_location(&self) -> String {
+        self.store_dir.display().to_string()
+    }
+
+    fn manifest_path(&self, agent_id: &str) -> Option<PathBuf> {
+        Some(self.resolve_manifest_path(agent_id))
+    }
+
+    fn output_path(&self, agent_id: &str) -> Option<PathBuf> {
+        Some(self.resolve_output_path(agent_id))
     }
 }
 

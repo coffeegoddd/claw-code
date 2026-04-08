@@ -23,8 +23,7 @@ fn resumed_binary_accepts_slash_commands_with_arguments() {
 
     let mut session = Session::new();
     session
-        .push_user_text("ship the slash command harness")
-        .expect("session write should succeed");
+        .push_user_text("ship the slash command harness");
     session
         .save_to_path(&session_path)
         .expect("session should persist");
@@ -193,8 +192,7 @@ fn resume_latest_restores_the_most_recent_managed_session() {
 
     let mut older = Session::new().with_persistence_path(&older_path);
     older
-        .push_user_text("older session")
-        .expect("older push should succeed");
+        .push_user_text("older session");
     older
         .save_to_path(&older_path)
         .expect("older session should persist");
@@ -204,11 +202,9 @@ fn resume_latest_restores_the_most_recent_managed_session() {
 
     let mut newer = Session::new().with_persistence_path(&newer_path);
     newer
-        .push_user_text("newer session")
-        .expect("newer push should succeed");
+        .push_user_text("newer session");
     newer
-        .push_user_text("resume me")
-        .expect("newer push should succeed");
+        .push_user_text("resume me");
     newer
         .save_to_path(&newer_path)
         .expect("newer session should persist");
@@ -239,8 +235,7 @@ fn resumed_status_command_emits_structured_json_when_requested() {
 
     let mut session = Session::new();
     session
-        .push_user_text("resume status json fixture")
-        .expect("session write should succeed");
+        .push_user_text("resume status json fixture");
     session
         .save_to_path(&session_path)
         .expect("session should persist");

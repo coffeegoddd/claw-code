@@ -13,7 +13,7 @@ use runtime::{
     ReviewStatus,
 };
 
-use crate::AgentOutput;
+use crate::agent_store::AgentManifest;
 
 /// Detects if a lane should be automatically marked as completed.
 ///
@@ -21,7 +21,7 @@ use crate::AgentOutput;
 /// `None` if lane should remain active.
 #[allow(dead_code)]
 pub(crate) fn detect_lane_completion(
-    output: &AgentOutput,
+    output: &AgentManifest,
     test_green: bool,
     has_pushed: bool,
 ) -> Option<LaneContext> {
@@ -94,8 +94,8 @@ mod tests {
     use super::*;
     use runtime::{DiffScope, LaneBlocker};
 
-    fn test_output() -> AgentOutput {
-        AgentOutput {
+    fn test_output() -> AgentManifest {
+        AgentManifest {
             agent_id: "test-lane-1".to_string(),
             name: "Test Agent".to_string(),
             description: "Test".to_string(),

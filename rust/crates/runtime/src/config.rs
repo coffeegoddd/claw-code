@@ -234,18 +234,25 @@ impl From<std::io::Error> for ConfigError {
 }
 
 /// Discovers config files and merges them into a [`RuntimeConfig`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ConfigLoader {
     cwd: PathBuf,
     config_home: PathBuf,
+    store: std::sync::Arc<dyn crate::config_store::ConfigStore>,
 }
 
 impl ConfigLoader {
     #[must_use]
     pub fn new(cwd: impl Into<PathBuf>, config_home: impl Into<PathBuf>) -> Self {
+        let cwd = cwd.into();
+        let config_home = config_home.into();
+        let store: std::sync::Arc<dyn crate::config_store::ConfigStore> = std::sync::Arc::new(
+            crate::config_store::FileConfigStore::new(&cwd, &config_home),
+        );
         Self {
-            cwd: cwd.into(),
-            config_home: config_home.into(),
+            cwd,
+            config_home,
+            store,
         }
     }
 
@@ -253,7 +260,25 @@ impl ConfigLoader {
     pub fn default_for(cwd: impl Into<PathBuf>) -> Self {
         let cwd = cwd.into();
         let config_home = default_config_home();
-        Self { cwd, config_home }
+        let store: std::sync::Arc<dyn crate::config_store::ConfigStore> = std::sync::Arc::new(
+            crate::config_store::FileConfigStore::new(&cwd, &config_home),
+        );
+        Self {
+            cwd,
+            config_home,
+            store,
+        }
+    }
+
+    /// Replace the config store backend. Allows swapping in a Dolt or custom
+    /// store for testing or non-filesystem environments.
+    #[must_use]
+    pub fn with_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::config_store::ConfigStore>,
+    ) -> Self {
+        self.store = store;
+        self
     }
 
     #[must_use]
@@ -297,25 +322,25 @@ impl ConfigLoader {
         let mut mcp_servers = BTreeMap::new();
         let mut all_warnings = Vec::new();
 
-        for entry in self.discover() {
-            crate::config_validate::check_unsupported_format(&entry.path)?;
-            let Some(parsed) = read_optional_json_object(&entry.path)? else {
-                continue;
-            };
+        let layers = self.store.load_layers()?;
+        for layer in layers {
             let validation = crate::config_validate::validate_config_file(
-                &parsed.object,
-                &parsed.source,
-                &entry.path,
+                &layer.object,
+                &layer.source_text,
+                &layer.path,
             );
             if !validation.is_ok() {
                 let first_error = &validation.errors[0];
                 return Err(ConfigError::Parse(first_error.to_string()));
             }
             all_warnings.extend(validation.warnings);
-            validate_optional_hooks_config(&parsed.object, &entry.path)?;
-            merge_mcp_servers(&mut mcp_servers, entry.source, &parsed.object, &entry.path)?;
-            deep_merge_objects(&mut merged, &parsed.object);
-            loaded_entries.push(entry);
+            validate_optional_hooks_config(&layer.object, &layer.path)?;
+            merge_mcp_servers(&mut mcp_servers, layer.scope, &layer.object, &layer.path)?;
+            deep_merge_objects(&mut merged, &layer.object);
+            loaded_entries.push(ConfigEntry {
+                source: layer.scope,
+                path: layer.path,
+            });
         }
 
         for warning in &all_warnings {
@@ -686,47 +711,6 @@ impl McpServerConfig {
             Self::ManagedProxy(_) => McpTransport::ManagedProxy,
         }
     }
-}
-
-/// Parsed JSON object paired with its raw source text for validation.
-struct ParsedConfigFile {
-    object: BTreeMap<String, JsonValue>,
-    source: String,
-}
-
-fn read_optional_json_object(path: &Path) -> Result<Option<ParsedConfigFile>, ConfigError> {
-    let is_legacy_config = path.file_name().and_then(|name| name.to_str()) == Some(".claw.json");
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(ConfigError::Io(error)),
-    };
-
-    if contents.trim().is_empty() {
-        return Ok(Some(ParsedConfigFile {
-            object: BTreeMap::new(),
-            source: contents,
-        }));
-    }
-
-    let parsed = match JsonValue::parse(&contents) {
-        Ok(parsed) => parsed,
-        Err(_error) if is_legacy_config => return Ok(None),
-        Err(error) => return Err(ConfigError::Parse(format!("{}: {error}", path.display()))),
-    };
-    let Some(object) = parsed.as_object() else {
-        if is_legacy_config {
-            return Ok(None);
-        }
-        return Err(ConfigError::Parse(format!(
-            "{}: top-level settings value must be a JSON object",
-            path.display()
-        )));
-    };
-    Ok(Some(ParsedConfigFile {
-        object: object.clone(),
-        source: contents,
-    }))
 }
 
 fn merge_mcp_servers(

@@ -2,6 +2,9 @@ pub mod agent_store;
 pub mod dolt_agent_store;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use agent_store::{AgentManifest, AgentStore, FileAgentStore};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -59,7 +62,7 @@ fn global_cron_registry() -> &'static CronRegistry {
     REGISTRY.get_or_init(CronRegistry::new)
 }
 
-fn global_task_registry() -> &'static TaskRegistry {
+fn global_task_registry() -> &'static dyn runtime::TaskRegistryBackend {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<TaskRegistry> = OnceLock::new();
     REGISTRY.get_or_init(TaskRegistry::new)
@@ -1317,7 +1320,7 @@ fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> 
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_create(input: TaskCreateInput) -> Result<String, String> {
     let registry = global_task_registry();
-    let task = registry.create(&input.prompt, input.description.as_deref());
+    let task = registry.create(&input.prompt, input.description.as_deref())?;
     to_pretty_json(json!({
         "task_id": task.task_id,
         "status": task.status,
@@ -1331,9 +1334,7 @@ fn run_task_create(input: TaskCreateInput) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_packet(input: TaskPacket) -> Result<String, String> {
     let registry = global_task_registry();
-    let task = registry
-        .create_from_packet(input)
-        .map_err(|error| error.to_string())?;
+    let task = registry.create_from_packet(input)?;
 
     to_pretty_json(json!({
         "task_id": task.task_id,
@@ -1348,7 +1349,7 @@ fn run_task_packet(input: TaskPacket) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_get(input: TaskIdInput) -> Result<String, String> {
     let registry = global_task_registry();
-    match registry.get(&input.task_id) {
+    match registry.get(&input.task_id)? {
         Some(task) => to_pretty_json(json!({
             "task_id": task.task_id,
             "status": task.status,
@@ -1367,7 +1368,7 @@ fn run_task_get(input: TaskIdInput) -> Result<String, String> {
 fn run_task_list(_input: Value) -> Result<String, String> {
     let registry = global_task_registry();
     let tasks: Vec<_> = registry
-        .list(None)
+        .list(None)?
         .into_iter()
         .map(|t| {
             json!({
@@ -1391,41 +1392,35 @@ fn run_task_list(_input: Value) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_stop(input: TaskIdInput) -> Result<String, String> {
     let registry = global_task_registry();
-    match registry.stop(&input.task_id) {
-        Ok(task) => to_pretty_json(json!({
-            "task_id": task.task_id,
-            "status": task.status,
-            "message": "Task stopped"
-        })),
-        Err(e) => Err(e),
-    }
+    let task = registry.stop(&input.task_id)?;
+    to_pretty_json(json!({
+        "task_id": task.task_id,
+        "status": task.status,
+        "message": "Task stopped"
+    }))
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
     let registry = global_task_registry();
-    match registry.update(&input.task_id, &input.message) {
-        Ok(task) => to_pretty_json(json!({
-            "task_id": task.task_id,
-            "status": task.status,
-            "message_count": task.messages.len(),
-            "last_message": input.message
-        })),
-        Err(e) => Err(e),
-    }
+    let task = registry.update(&input.task_id, &input.message)?;
+    to_pretty_json(json!({
+        "task_id": task.task_id,
+        "status": task.status,
+        "message_count": task.messages.len(),
+        "last_message": input.message
+    }))
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_output(input: TaskIdInput) -> Result<String, String> {
     let registry = global_task_registry();
-    match registry.output(&input.task_id) {
-        Ok(output) => to_pretty_json(json!({
-            "task_id": input.task_id,
-            "output": output,
-            "has_output": !output.is_empty()
-        })),
-        Err(e) => Err(e),
-    }
+    let output = registry.output(&input.task_id)?;
+    to_pretty_json(json!({
+        "task_id": input.task_id,
+        "output": output,
+        "has_output": !output.is_empty()
+    }))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1970,7 +1965,9 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
 }
 
 fn run_agent(input: AgentInput) -> Result<String, String> {
-    to_pretty_json(execute_agent(input)?)
+    let store: Arc<dyn AgentStore> =
+        Arc::new(FileAgentStore::from_env().map_err(|e| e.to_string())?);
+    to_pretty_json(execute_agent(input, store)?)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -2357,39 +2354,10 @@ struct SkillOutput {
     prompt: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentOutput {
-    #[serde(rename = "agentId")]
-    agent_id: String,
-    name: String,
-    description: String,
-    #[serde(rename = "subagentType")]
-    subagent_type: Option<String>,
-    model: Option<String>,
-    status: String,
-    #[serde(rename = "outputFile")]
-    output_file: String,
-    #[serde(rename = "manifestFile")]
-    manifest_file: String,
-    #[serde(rename = "createdAt")]
-    created_at: String,
-    #[serde(rename = "startedAt", skip_serializing_if = "Option::is_none")]
-    started_at: Option<String>,
-    #[serde(rename = "completedAt", skip_serializing_if = "Option::is_none")]
-    completed_at: Option<String>,
-    #[serde(rename = "laneEvents", default, skip_serializing_if = "Vec::is_empty")]
-    lane_events: Vec<LaneEvent>,
-    #[serde(rename = "currentBlocker", skip_serializing_if = "Option::is_none")]
-    current_blocker: Option<LaneEventBlocker>,
-    #[serde(rename = "derivedState")]
-    derived_state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 struct AgentJob {
-    manifest: AgentOutput,
+    manifest: AgentManifest,
+    store: Arc<dyn AgentStore>,
     prompt: String,
     system_prompt: Vec<String>,
     allowed_tools: BTreeSet<String>,
@@ -3252,11 +3220,18 @@ const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_AGENT_SYSTEM_DATE: &str = "2026-03-31";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
-fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
-    execute_agent_with_spawn(input, spawn_agent_job)
+fn execute_agent(
+    input: AgentInput,
+    store: Arc<dyn AgentStore>,
+) -> Result<AgentManifest, String> {
+    execute_agent_with_spawn(input, store, spawn_agent_job)
 }
 
-fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
+fn execute_agent_with_spawn<F>(
+    input: AgentInput,
+    store: Arc<dyn AgentStore>,
+    spawn_fn: F,
+) -> Result<AgentManifest, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
@@ -3268,10 +3243,6 @@ where
     }
 
     let agent_id = make_agent_id();
-    let output_dir = agent_store_dir()?;
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-    let output_file = output_dir.join(format!("{agent_id}.md"));
-    let manifest_file = output_dir.join(format!("{agent_id}.json"));
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
     let model = resolve_agent_model(input.model.as_deref());
     let agent_name = input
@@ -3299,17 +3270,19 @@ where
 ",
         agent_id, agent_name, input.description, normalized_subagent_type, created_at, input.prompt
     );
-    std::fs::write(&output_file, output_contents).map_err(|error| error.to_string())?;
+    store
+        .write_output(&agent_id, &output_contents)
+        .map_err(|e| e.to_string())?;
 
-    let manifest = AgentOutput {
+    let manifest = AgentManifest {
         agent_id,
         name: agent_name,
         description: input.description,
         subagent_type: Some(normalized_subagent_type),
         model: Some(model),
         status: String::from("running"),
-        output_file: output_file.display().to_string(),
-        manifest_file: manifest_file.display().to_string(),
+        output_file: String::new(),
+        manifest_file: String::new(),
         created_at: created_at.clone(),
         started_at: Some(created_at),
         completed_at: None,
@@ -3318,18 +3291,21 @@ where
         derived_state: String::from("working"),
         error: None,
     };
-    write_agent_manifest(&manifest)?;
+    store
+        .create_agent(&manifest)
+        .map_err(|e| e.to_string())?;
 
     let manifest_for_spawn = manifest.clone();
     let job = AgentJob {
         manifest: manifest_for_spawn,
+        store: Arc::clone(&store),
         prompt: input.prompt,
         system_prompt,
         allowed_tools,
     };
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
-        persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()))?;
+        persist_agent_terminal_state(&store, &manifest, "failed", None, Some(error.clone()))?;
         return Err(error);
     }
 
@@ -3346,11 +3322,17 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    let _ =
-                        persist_agent_terminal_state(&job.manifest, "failed", None, Some(error));
+                    let _ = persist_agent_terminal_state(
+                        &job.store,
+                        &job.manifest,
+                        "failed",
+                        None,
+                        Some(error),
+                    );
                 }
                 Err(_) => {
                     let _ = persist_agent_terminal_state(
+                        &job.store,
                         &job.manifest,
                         "failed",
                         None,
@@ -3369,7 +3351,13 @@ fn run_agent_job(job: &AgentJob) -> Result<(), String> {
         .run_turn(job.prompt.clone(), None)
         .map_err(|error| error.to_string())?;
     let final_text = final_assistant_text(&summary);
-    persist_agent_terminal_state(&job.manifest, "completed", Some(final_text.as_str()), None)
+    persist_agent_terminal_state(
+        &job.store,
+        &job.manifest,
+        "completed",
+        Some(final_text.as_str()),
+        None,
+    )
 }
 
 fn build_agent_runtime(
@@ -3505,27 +3493,20 @@ fn agent_permission_policy() -> PermissionPolicy {
     )
 }
 
-fn write_agent_manifest(manifest: &AgentOutput) -> Result<(), String> {
-    let mut normalized = manifest.clone();
-    normalized.lane_events = dedupe_superseded_commit_events(&normalized.lane_events);
-    std::fs::write(
-        &normalized.manifest_file,
-        serde_json::to_string_pretty(&normalized).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())
-}
-
 fn persist_agent_terminal_state(
-    manifest: &AgentOutput,
+    store: &dyn AgentStore,
+    manifest: &AgentManifest,
     status: &str,
     result: Option<&str>,
     error: Option<String>,
 ) -> Result<(), String> {
     let blocker = error.as_deref().map(classify_lane_blocker);
-    append_agent_output(
-        &manifest.output_file,
-        &format_agent_terminal_output(status, result, blocker.as_ref(), error.as_deref()),
-    )?;
+    store
+        .append_output(
+            &manifest.agent_id,
+            &format_agent_terminal_output(status, result, blocker.as_ref(), error.as_deref()),
+        )
+        .map_err(|e| e.to_string())?;
     let mut next_manifest = manifest.clone();
     next_manifest.status = status.to_string();
     next_manifest.completed_at = Some(iso8601_now());
@@ -3556,7 +3537,9 @@ fn persist_agent_terminal_state(
             ));
         }
     }
-    write_agent_manifest(&next_manifest)
+    store
+        .update_agent(&next_manifest)
+        .map_err(|e| e.to_string())
 }
 
 fn derive_agent_state(
@@ -3634,16 +3617,6 @@ fn current_git_branch() -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn append_agent_output(path: &str, suffix: &str) -> Result<(), String> {
-    use std::io::Write as _;
-
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    file.write_all(suffix.as_bytes())
-        .map_err(|error| error.to_string())
-}
 
 fn format_agent_terminal_output(
     status: &str,
@@ -4200,16 +4173,6 @@ fn canonical_tool_token(value: &str) -> String {
     canonical
 }
 
-fn agent_store_dir() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
-        return Ok(std::path::PathBuf::from(path));
-    }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".clawd-agents"));
-    }
-    Ok(cwd.join(".clawd-agents"))
-}
 
 fn make_agent_id() -> String {
     let nanos = std::time::SystemTime::now()
@@ -5332,12 +5295,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        agent_permission_policy, allowed_tools_for_subagent, classify_lane_failure,
-        derive_agent_state, execute_agent_with_spawn, execute_tool, final_assistant_text,
-        maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
+        agent_permission_policy, agent_store::FileAgentStore, allowed_tools_for_subagent,
+        classify_lane_failure, derive_agent_state, execute_agent_with_spawn, execute_tool,
+        final_assistant_text, maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
         persist_agent_terminal_state, push_output_block, run_task_packet, AgentInput, AgentJob,
-        GlobalToolRegistry, LaneEventName, LaneFailureClass, ProviderRuntimeClient,
-        SubagentToolExecutor,
+        AgentManifest, AgentStore, GlobalToolRegistry, LaneEventName, LaneFailureClass,
+        ProviderRuntimeClient, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::ProviderFallbackConfig;
@@ -6505,6 +6468,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-store");
         std::env::set_var("CLAWD_AGENT_STORE", &dir);
+        let store: Arc<dyn AgentStore> =
+            Arc::new(FileAgentStore::new(&dir).expect("store should build"));
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
         let captured_for_spawn = Arc::clone(&captured);
 
@@ -6516,6 +6481,7 @@ mod tests {
                 name: Some("ship-audit".to_string()),
                 model: None,
             },
+            Arc::clone(&store),
             move |job| {
                 *captured_for_spawn
                     .lock()
@@ -6532,9 +6498,15 @@ mod tests {
         assert!(!manifest.created_at.is_empty());
         assert!(manifest.started_at.is_some());
         assert!(manifest.completed_at.is_none());
-        let contents = std::fs::read_to_string(&manifest.output_file).expect("agent file exists");
+        let output_path = store
+            .output_path(&manifest.agent_id)
+            .expect("file store should return output path");
+        let manifest_path = store
+            .manifest_path(&manifest.agent_id)
+            .expect("file store should return manifest path");
+        let contents = std::fs::read_to_string(&output_path).expect("agent file exists");
         let manifest_contents =
-            std::fs::read_to_string(&manifest.manifest_file).expect("manifest file exists");
+            std::fs::read_to_string(&manifest_path).expect("manifest file exists");
         let manifest_json: serde_json::Value =
             serde_json::from_str(&manifest_contents).expect("manifest should be valid json");
         assert!(contents.contains("Audit the branch"));
@@ -6588,6 +6560,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-runner");
         std::env::set_var("CLAWD_AGENT_STORE", &dir);
+        let store: Arc<dyn AgentStore> =
+            Arc::new(FileAgentStore::new(&dir).expect("store should build"));
 
         let completed = execute_agent_with_spawn(
             AgentInput {
@@ -6597,8 +6571,10 @@ mod tests {
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
             },
+            Arc::clone(&store),
             |job| {
                 persist_agent_terminal_state(
+                    &*job.store,
                     &job.manifest,
                     "completed",
                     Some("Finished successfully in commit abc1234"),
@@ -6608,12 +6584,18 @@ mod tests {
         )
         .expect("completed agent should succeed");
 
-        let completed_manifest = std::fs::read_to_string(&completed.manifest_file)
+        let completed_manifest_path = store
+            .manifest_path(&completed.agent_id)
+            .expect("file store should return manifest path");
+        let completed_output_path = store
+            .output_path(&completed.agent_id)
+            .expect("file store should return output path");
+        let completed_manifest = std::fs::read_to_string(&completed_manifest_path)
             .expect("completed manifest should exist");
         let completed_manifest_json: serde_json::Value =
             serde_json::from_str(&completed_manifest).expect("completed manifest json");
         let completed_output =
-            std::fs::read_to_string(&completed.output_file).expect("completed output should exist");
+            std::fs::read_to_string(&completed_output_path).expect("completed output should exist");
         assert!(completed_manifest.contains("\"status\": \"completed\""));
         assert!(completed_output.contains("Finished successfully"));
         assert_eq!(
@@ -6646,8 +6628,10 @@ mod tests {
                 name: Some("fail-task".to_string()),
                 model: None,
             },
+            Arc::clone(&store),
             |job| {
                 persist_agent_terminal_state(
+                    &*job.store,
                     &job.manifest,
                     "failed",
                     None,
@@ -6657,12 +6641,18 @@ mod tests {
         )
         .expect("failed agent should still spawn");
 
+        let failed_manifest_path = store
+            .manifest_path(&failed.agent_id)
+            .expect("file store should return manifest path");
+        let failed_output_path = store
+            .output_path(&failed.agent_id)
+            .expect("file store should return output path");
         let failed_manifest =
-            std::fs::read_to_string(&failed.manifest_file).expect("failed manifest should exist");
+            std::fs::read_to_string(&failed_manifest_path).expect("failed manifest should exist");
         let failed_manifest_json: serde_json::Value =
             serde_json::from_str(&failed_manifest).expect("failed manifest json");
         let failed_output =
-            std::fs::read_to_string(&failed.output_file).expect("failed output should exist");
+            std::fs::read_to_string(&failed_output_path).expect("failed output should exist");
         assert!(failed_manifest.contains("\"status\": \"failed\""));
         assert!(failed_manifest.contains("simulated failure"));
         assert!(failed_output.contains("simulated failure"));
@@ -6693,6 +6683,7 @@ mod tests {
                 name: Some("spawn-error".to_string()),
                 model: None,
             },
+            Arc::clone(&store),
             |_| Err(String::from("thread creation failed")),
         )
         .expect_err("spawn errors should surface");
