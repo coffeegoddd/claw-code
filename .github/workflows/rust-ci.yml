@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'db/**'
       - 'gaebal/**'
       - 'omx-issue-*'
     paths:
@@ -97,4 +98,4 @@ jobs:
         with:
           workspaces: rust -> target
       - name: Run workspace clippy
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
