@@ -61,9 +61,9 @@ use runtime::{
     CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage,
     ConversationRuntime, ManagedSessionSummary, McpServer, McpServerManager, McpServerSpec,
     McpTool, MessageRole, ModelPricing, OAuthAuthorizationRequest, OAuthConfig,
-    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext,
-    PromptCacheEvent, ResolvedPermissionMode, RuntimeError, Session, SessionBackend,
-    SessionBackendError, SessionStore, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
+    ResolvedPermissionMode, RuntimeError, Session, SessionBackend, SessionBackendError,
+    SessionStore, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -86,9 +86,7 @@ const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
 const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const POST_TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(10);
-use runtime::session_control::{
-    LATEST_SESSION_REFERENCE, PRIMARY_SESSION_EXTENSION,
-};
+use runtime::session_control::{LATEST_SESSION_REFERENCE, PRIMARY_SESSION_EXTENSION};
 const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--help",
     "-h",
@@ -1347,7 +1345,7 @@ fn run_worker_state(output_format: CliOutputFormat) -> Result<(), Box<dyn std::e
     if !state_path.exists() {
         match output_format {
             CliOutputFormat::Text => {
-                println!("No worker state file found at {}", state_path.display());
+                println!("No worker state file found at {}", state_path.display())
             }
             CliOutputFormat::Json => println!(
                 "{}",
@@ -3327,8 +3325,7 @@ impl LiveCli {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
         let backend: Box<dyn SessionBackend> = Box::new(
-            SessionStore::from_cwd(&cwd)
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+            SessionStore::from_cwd(&cwd).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
         );
         let system_prompt = build_system_prompt()?;
         let session_state = Session::new();
@@ -3996,11 +3993,7 @@ impl LiveCli {
             .unwrap_or_else(|| self.backend.storage_location());
         println!(
             "{}",
-            format_resume_report(
-                &path_display,
-                message_count,
-                self.runtime.usage().turns(),
-            )
+            format_resume_report(&path_display, message_count, self.runtime.usage().turns(),)
         );
         Ok(true)
     }
@@ -4435,7 +4428,6 @@ fn confirm_session_deletion(session_id: &str) -> bool {
     }
     matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES")
 }
-
 
 fn render_session_list(
     active_session_id: &str,
@@ -5521,8 +5513,7 @@ fn run_export(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let backend: Box<dyn SessionBackend> = Box::new(
-        SessionStore::from_cwd(&cwd)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+        SessionStore::from_cwd(&cwd).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
     );
     let resolved_id = backend
         .resolve_reference(session_reference)
@@ -7675,27 +7666,26 @@ fn print_help(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::
 mod tests {
     use super::{
         build_runtime_plugin_state_with_loader, build_runtime_with_plugin_state,
-        collect_session_prompt_history, describe_tool_progress,
-        filter_tool_specs, format_bughunter_report, format_commit_preflight_report,
-        format_commit_skipped_report, format_compact_report, format_connected_line,
-        format_cost_report, format_history_timestamp, format_internal_prompt_progress_line,
-        format_issue_report, format_model_report, format_model_switch_report,
-        format_permissions_report, format_permissions_switch_report, format_pr_report,
-        format_resume_report, format_status_report, format_tool_call_start, format_tool_result,
-        format_ultraplan_report, format_unknown_slash_command,
+        collect_session_prompt_history, describe_tool_progress, filter_tool_specs,
+        format_bughunter_report, format_commit_preflight_report, format_commit_skipped_report,
+        format_compact_report, format_connected_line, format_cost_report, format_history_timestamp,
+        format_internal_prompt_progress_line, format_issue_report, format_model_report,
+        format_model_switch_report, format_permissions_report, format_permissions_switch_report,
+        format_pr_report, format_resume_report, format_status_report, format_tool_call_start,
+        format_tool_result, format_ultraplan_report, format_unknown_slash_command,
         format_unknown_slash_command_message, format_user_visible_api_error,
-        merge_prompt_with_stdin, normalize_permission_mode, parse_args, parse_git_status_branch,
-        parse_git_status_metadata_for, parse_git_workspace_summary, permission_policy,
-        print_help_to, push_output_block, render_config_report, render_diff_report,
-        render_diff_report_for, render_memory_report, render_repl_help, render_resume_usage,
-        resolve_model_alias, resolve_model_alias_with_config, resolve_repl_model,
-        response_to_events, resume_supported_slash_commands,
-        run_resume_command, slash_command_completion_candidates_with_sessions, status_context,
-        validate_no_args, write_mcp_server_fixture, CliAction, CliOutputFormat, CliToolExecutor,
-        GitWorkspaceSummary, InternalPromptProgressEvent, InternalPromptProgressState, LiveCli,
-        LocalHelpTopic, SlashCommand, StatusUsage, DEFAULT_MODEL, LATEST_SESSION_REFERENCE,
-        PromptHistoryEntry, render_prompt_history_report, parse_history_count,
-        parse_export_args, render_session_markdown, summarize_tool_payload_for_markdown, short_tool_id,
+        merge_prompt_with_stdin, normalize_permission_mode, parse_args, parse_export_args,
+        parse_git_status_branch, parse_git_status_metadata_for, parse_git_workspace_summary,
+        parse_history_count, permission_policy, print_help_to, push_output_block,
+        render_config_report, render_diff_report, render_diff_report_for, render_memory_report,
+        render_prompt_history_report, render_repl_help, render_resume_usage,
+        render_session_markdown, resolve_model_alias, resolve_model_alias_with_config,
+        resolve_repl_model, response_to_events, resume_supported_slash_commands,
+        run_resume_command, short_tool_id, slash_command_completion_candidates_with_sessions,
+        status_context, summarize_tool_payload_for_markdown, validate_no_args,
+        write_mcp_server_fixture, CliAction, CliOutputFormat, CliToolExecutor, GitWorkspaceSummary,
+        InternalPromptProgressEvent, InternalPromptProgressState, LiveCli, LocalHelpTopic,
+        PromptHistoryEntry, SlashCommand, StatusUsage, DEFAULT_MODEL, LATEST_SESSION_REFERENCE,
     };
     use api::{ApiError, MessageResponse, OutputContentBlock, Usage};
     use plugins::{

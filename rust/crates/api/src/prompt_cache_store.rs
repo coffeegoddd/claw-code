@@ -30,29 +30,17 @@ pub struct StoredCompletion {
 pub trait PromptCacheStore: Debug + Send + Sync {
     /// Read a cached completion entry by session and request hash.
     /// Returns `None` if the entry does not exist on disk / in the store.
-    fn read_completion(
-        &self,
-        session_id: &str,
-        request_hash: &str,
-    ) -> Option<StoredCompletion>;
+    fn read_completion(&self, session_id: &str, request_hash: &str) -> Option<StoredCompletion>;
 
     /// Write (or overwrite) a completion entry.
-    fn write_completion(
-        &self,
-        session_id: &str,
-        request_hash: &str,
-        entry: &StoredCompletion,
-    );
+    fn write_completion(&self, session_id: &str, request_hash: &str, entry: &StoredCompletion);
 
     /// Delete a single completion entry (e.g. on TTL expiry or version mismatch).
     fn delete_completion(&self, session_id: &str, request_hash: &str);
 
     /// Load the persisted stats and tracked prompt state for a session.
     /// Returns defaults if nothing has been persisted yet.
-    fn load_state(
-        &self,
-        session_id: &str,
-    ) -> (PromptCacheStats, Option<TrackedPromptState>);
+    fn load_state(&self, session_id: &str) -> (PromptCacheStats, Option<TrackedPromptState>);
 
     /// Persist the current stats and tracked prompt state for a session.
     fn persist_state(
@@ -86,22 +74,13 @@ impl FilePromptCacheStore {
 }
 
 impl PromptCacheStore for FilePromptCacheStore {
-    fn read_completion(
-        &self,
-        session_id: &str,
-        request_hash: &str,
-    ) -> Option<StoredCompletion> {
+    fn read_completion(&self, session_id: &str, request_hash: &str) -> Option<StoredCompletion> {
         let paths = self.paths_for(session_id);
         let entry_path = paths.completion_entry_path(request_hash);
         read_json(&entry_path)
     }
 
-    fn write_completion(
-        &self,
-        session_id: &str,
-        request_hash: &str,
-        entry: &StoredCompletion,
-    ) {
+    fn write_completion(&self, session_id: &str, request_hash: &str, entry: &StoredCompletion) {
         let paths = self.paths_for(session_id);
         self.ensure_dirs(&paths);
         let _ = write_json(&paths.completion_entry_path(request_hash), entry);
@@ -112,10 +91,7 @@ impl PromptCacheStore for FilePromptCacheStore {
         let _ = fs::remove_file(paths.completion_entry_path(request_hash));
     }
 
-    fn load_state(
-        &self,
-        session_id: &str,
-    ) -> (PromptCacheStats, Option<TrackedPromptState>) {
+    fn load_state(&self, session_id: &str) -> (PromptCacheStats, Option<TrackedPromptState>) {
         let paths = self.paths_for(session_id);
         let stats = read_json::<PromptCacheStats>(&paths.stats_path).unwrap_or_default();
         let previous = read_json::<TrackedPromptState>(&paths.session_state_path);

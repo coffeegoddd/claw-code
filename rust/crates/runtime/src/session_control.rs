@@ -243,10 +243,7 @@ impl SessionStore {
 }
 
 impl SessionBackend for SessionStore {
-    fn create_session(
-        &self,
-        session: &Session,
-    ) -> Result<(), SessionBackendError> {
+    fn create_session(&self, session: &Session) -> Result<(), SessionBackendError> {
         let handle = self.create_handle(&session.session_id);
         let snapshot = session.render_jsonl_snapshot()?;
         crate::session::write_atomic(&handle.path, &snapshot)?;
@@ -310,9 +307,9 @@ impl SessionBackend for SessionStore {
         compaction: &SessionCompaction,
         _remove_messages_before_ordinal: Option<u32>,
     ) -> Result<(), SessionBackendError> {
-        let mut session = self.load_session(session_id)?;
+        let mut session = SessionBackend::load_session(self, session_id)?;
         session.record_compaction(&compaction.summary, compaction.removed_message_count);
-        self.save_snapshot(&session)?;
+        SessionBackend::save_snapshot(self, &session)?;
         Ok(())
     }
 
@@ -322,22 +319,17 @@ impl SessionBackend for SessionStore {
         _new_session_id: &str,
         branch_name: Option<&str>,
     ) -> Result<Session, SessionBackendError> {
-        let source = self.load_session(source_id)?;
+        let source = SessionBackend::load_session(self, source_id)?;
         let forked = source.fork(branch_name.map(ToOwned::to_owned));
-        self.create_session(&forked)?;
+        SessionBackend::create_session(self, &forked)?;
         Ok(forked)
     }
 
-    fn list_sessions(
-        &self,
-    ) -> Result<Vec<ManagedSessionSummary>, SessionBackendError> {
+    fn list_sessions(&self) -> Result<Vec<ManagedSessionSummary>, SessionBackendError> {
         Ok(SessionStore::list_sessions(self)?)
     }
 
-    fn resolve_reference(
-        &self,
-        reference: &str,
-    ) -> Result<String, SessionBackendError> {
+    fn resolve_reference(&self, reference: &str) -> Result<String, SessionBackendError> {
         let handle = SessionStore::resolve_reference(self, reference)?;
         Ok(handle.id)
     }

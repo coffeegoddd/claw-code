@@ -50,10 +50,7 @@ pub trait PluginRegistryStore: Debug + Send + Sync {
 
     /// Remove a single plugin record from the registry.
     /// Returns the removed record, or `None` if the plugin was not found.
-    fn remove_plugin(
-        &self,
-        plugin_id: &str,
-    ) -> Result<Option<InstalledPluginRecord>, PluginError> {
+    fn remove_plugin(&self, plugin_id: &str) -> Result<Option<InstalledPluginRecord>, PluginError> {
         let mut registry = self.load_registry()?;
         let removed = registry.plugins.remove(plugin_id);
         if removed.is_some() {
@@ -174,11 +171,11 @@ impl PluginRegistryStore for FilePluginRegistryStore {
         }
 
         let mut root = match fs::read_to_string(&path) {
-            Ok(contents) if !contents.trim().is_empty() => serde_json::from_str::<Value>(&contents)?,
-            Ok(_) => Value::Object(Map::new()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Value::Object(Map::new())
+            Ok(contents) if !contents.trim().is_empty() => {
+                serde_json::from_str::<Value>(&contents)?
             }
+            Ok(_) => Value::Object(Map::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Object(Map::new()),
             Err(error) => return Err(PluginError::Io(error)),
         };
 
@@ -194,9 +191,7 @@ impl PluginRegistryStore for FilePluginRegistryStore {
             .or_insert_with(|| Value::Object(Map::new()))
             .as_object_mut()
             .ok_or_else(|| {
-                PluginError::InvalidManifest(
-                    "enabledPlugins must be a JSON object".to_string(),
-                )
+                PluginError::InvalidManifest("enabledPlugins must be a JSON object".to_string())
             })?;
 
         match enabled {

@@ -14,6 +14,7 @@ pub mod config_store;
 pub mod config_validate;
 mod conversation;
 pub mod dolt_config_store;
+pub mod dolt_session_backend;
 mod file_ops;
 mod git_context;
 pub mod green_contract;
@@ -36,7 +37,6 @@ mod prompt;
 pub mod recovery_recipes;
 mod remote;
 pub mod sandbox;
-pub mod dolt_session_backend;
 mod session;
 pub mod session_backend;
 pub mod session_control;
@@ -46,6 +46,7 @@ pub use session_control::{
     ForkedManagedSession, LoadedManagedSession, ManagedSessionSummary, SessionControlError,
     SessionHandle, SessionStore,
 };
+pub mod dolt_task_registry_backend;
 mod sse;
 pub mod stale_base;
 pub mod stale_branch;
@@ -53,7 +54,6 @@ pub mod summary_compression;
 pub mod task_packet;
 pub mod task_registry;
 pub mod task_registry_backend;
-pub mod dolt_task_registry_backend;
 pub mod team_cron_registry;
 #[cfg(test)]
 mod trust_resolver;
@@ -76,12 +76,17 @@ pub use config::{
     CLAW_SETTINGS_SCHEMA_NAME,
 };
 pub use config_store::{ConfigLayer, ConfigStore, FileConfigStore};
-pub use dolt_config_store::DoltConfigStore;
+pub use config_validate::{
+    check_unsupported_format, format_diagnostics, validate_config_file, ConfigDiagnostic,
+    DiagnosticKind, ValidationResult,
+};
 pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
     ConversationRuntime, PromptCacheEvent, RuntimeError, StaticToolExecutor, ToolError,
     ToolExecutor, TurnSummary,
 };
+pub use dolt_config_store::DoltConfigStore;
+pub use dolt_task_registry_backend::DoltTaskRegistryBackend;
 pub use file_ops::{
     edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, GlobSearchOutput,
     GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
@@ -168,7 +173,6 @@ pub use stale_branch::{
     apply_policy, check_freshness, BranchFreshness, StaleBranchAction, StaleBranchEvent,
     StaleBranchPolicy,
 };
-pub use dolt_task_registry_backend::DoltTaskRegistryBackend;
 pub use task_packet::{validate_packet, TaskPacket, TaskPacketValidationError, ValidatedPacket};
 pub use task_registry_backend::{TaskRegistryBackend, TaskRegistryError};
 #[cfg(test)]

@@ -492,7 +492,6 @@ impl Session {
         Ok(rendered)
     }
 
-
     fn meta_record(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
@@ -1055,33 +1054,28 @@ mod tests {
     #[test]
     fn persists_and_restores_session_jsonl() {
         let mut session = Session::new();
-        session
-            .push_user_text("hello");
-        session
-            .push_message(ConversationMessage::assistant_with_usage(
-                vec![
-                    ContentBlock::Text {
-                        text: "thinking".to_string(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "tool-1".to_string(),
-                        name: "bash".to_string(),
-                        input: "echo hi".to_string(),
-                    },
-                ],
-                Some(TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 4,
-                    cache_creation_input_tokens: 1,
-                    cache_read_input_tokens: 2,
-                }),
-            ))
-            .expect("assistant message should append");
-        session
-            .push_message(ConversationMessage::tool_result(
-                "tool-1", "bash", "hi", false,
-            ))
-            .expect("tool result should append");
+        session.push_user_text("hello");
+        session.push_message(ConversationMessage::assistant_with_usage(
+            vec![
+                ContentBlock::Text {
+                    text: "thinking".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "bash".to_string(),
+                    input: "echo hi".to_string(),
+                },
+            ],
+            Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_creation_input_tokens: 1,
+                cache_read_input_tokens: 2,
+            }),
+        ));
+        session.push_message(ConversationMessage::tool_result(
+            "tool-1", "bash", "hi", false,
+        ));
 
         let path = temp_session_path("jsonl");
         session.save_to_path(&path).expect("session should save");
@@ -1131,13 +1125,10 @@ mod tests {
         session
             .save_to_path(&path)
             .expect("initial save should succeed");
-        session
-            .push_user_text("hi");
-        session
-            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "hello".to_string(),
-            }]))
-            .expect("assistant append should succeed");
+        session.push_user_text("hi");
+        session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }]));
 
         let restored = Session::load_from_path(&path).expect("session should replay from jsonl");
         fs::remove_file(&path).expect("temp file should be removable");
@@ -1150,8 +1141,7 @@ mod tests {
     fn persists_compaction_metadata() {
         let path = temp_session_path("compaction");
         let mut session = Session::new();
-        session
-            .push_user_text("before");
+        session.push_user_text("before");
         session.record_compaction("summarized earlier work", 4);
         session.save_to_path(&path).expect("session should save");
 
@@ -1168,8 +1158,7 @@ mod tests {
     fn forks_sessions_with_branch_metadata_and_persists_it() {
         let path = temp_session_path("fork");
         let mut session = Session::new();
-        session
-            .push_user_text("before fork");
+        session.push_user_text("before fork");
 
         let forked = session
             .fork(Some("investigation".to_string()))
@@ -1319,8 +1308,7 @@ mod tests {
         let path = temp_session_path("workspace-root");
         let workspace_root = PathBuf::from("/tmp/b4-phantom-diag");
         let mut session = Session::new().with_workspace_root(workspace_root.clone());
-        session
-            .push_user_text("write to the right cwd");
+        session.push_user_text("write to the right cwd");
 
         // when
         session
@@ -1373,4 +1361,3 @@ mod tests {
             .collect()
     }
 }
-

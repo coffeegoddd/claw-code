@@ -72,9 +72,8 @@ impl Display for TaskRegistryError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound(id) => write!(f, "task not found: {id}"),
-            Self::InvalidState(msg) => write!(f, "{msg}"),
+            Self::InvalidState(msg) | Self::Format(msg) => write!(f, "{msg}"),
             Self::Validation(err) => write!(f, "{err}"),
-            Self::Format(msg) => write!(f, "{msg}"),
             Self::Unimplemented(op) => write!(f, "operation not implemented: {op}"),
         }
     }

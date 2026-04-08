@@ -98,10 +98,7 @@ impl SessionBackend for DoltSessionBackend {
         ))
     }
 
-    fn resolve_reference(
-        &self,
-        _reference: &str,
-    ) -> Result<String, SessionBackendError> {
+    fn resolve_reference(&self, _reference: &str) -> Result<String, SessionBackendError> {
         Err(SessionBackendError::Unimplemented(
             "DoltSessionBackend::resolve_reference".to_string(),
         ))

@@ -65,10 +65,7 @@ pub trait SessionBackend {
 
     /// Resolve a session reference (ID, path, or alias like "latest") to a
     /// concrete session ID.
-    fn resolve_reference(
-        &self,
-        reference: &str,
-    ) -> Result<String, SessionBackendError>;
+    fn resolve_reference(&self, reference: &str) -> Result<String, SessionBackendError>;
 
     /// Return true if a session with this ID exists in the backend.
     fn session_exists(&self, session_id: &str) -> Result<bool, SessionBackendError>;

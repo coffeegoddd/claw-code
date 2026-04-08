@@ -22,8 +22,7 @@ fn resumed_binary_accepts_slash_commands_with_arguments() {
     let export_path = temp_dir.join("notes.txt");
 
     let mut session = Session::new();
-    session
-        .push_user_text("ship the slash command harness");
+    session.push_user_text("ship the slash command harness");
     session
         .save_to_path(&session_path)
         .expect("session should persist");
@@ -191,8 +190,7 @@ fn resume_latest_restores_the_most_recent_managed_session() {
     let newer_path = sessions_dir.join("session-newer.jsonl");
 
     let mut older = Session::new().with_persistence_path(&older_path);
-    older
-        .push_user_text("older session");
+    older.push_user_text("older session");
     older
         .save_to_path(&older_path)
         .expect("older session should persist");
@@ -201,10 +199,8 @@ fn resume_latest_restores_the_most_recent_managed_session() {
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     let mut newer = Session::new().with_persistence_path(&newer_path);
-    newer
-        .push_user_text("newer session");
-    newer
-        .push_user_text("resume me");
+    newer.push_user_text("newer session");
+    newer.push_user_text("resume me");
     newer
         .save_to_path(&newer_path)
         .expect("newer session should persist");
@@ -234,8 +230,7 @@ fn resumed_status_command_emits_structured_json_when_requested() {
     let session_path = temp_dir.join("session.jsonl");
 
     let mut session = Session::new();
-    session
-        .push_user_text("resume status json fixture");
+    session.push_user_text("resume status json fixture");
     session
         .save_to_path(&session_path)
         .expect("session should persist");

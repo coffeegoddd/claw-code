@@ -5,9 +5,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use runtime::{
-    dedupe_superseded_commit_events, LaneEvent, LaneEventBlocker,
-};
+use runtime::{dedupe_superseded_commit_events, LaneEvent, LaneEventBlocker};
 use serde::{Deserialize, Serialize};
 
 /// Persisted agent manifest. This is the single source-of-truth type for agent
@@ -164,8 +162,14 @@ impl AgentStore for FileAgentStore {
         let mut normalized = manifest.clone();
         normalized.lane_events = dedupe_superseded_commit_events(&normalized.lane_events);
         // Populate file paths for the stored manifest.
-        normalized.manifest_file = self.resolve_manifest_path(&manifest.agent_id).display().to_string();
-        normalized.output_file = self.resolve_output_path(&manifest.agent_id).display().to_string();
+        normalized.manifest_file = self
+            .resolve_manifest_path(&manifest.agent_id)
+            .display()
+            .to_string();
+        normalized.output_file = self
+            .resolve_output_path(&manifest.agent_id)
+            .display()
+            .to_string();
         let json = serde_json::to_string_pretty(&normalized)?;
         fs::write(self.resolve_manifest_path(&manifest.agent_id), json)?;
         Ok(())

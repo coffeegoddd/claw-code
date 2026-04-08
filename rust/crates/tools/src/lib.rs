@@ -3220,10 +3220,7 @@ const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_AGENT_SYSTEM_DATE: &str = "2026-03-31";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
-fn execute_agent(
-    input: AgentInput,
-    store: Arc<dyn AgentStore>,
-) -> Result<AgentManifest, String> {
+fn execute_agent(input: AgentInput, store: Arc<dyn AgentStore>) -> Result<AgentManifest, String> {
     execute_agent_with_spawn(input, store, spawn_agent_job)
 }
 
@@ -3291,9 +3288,7 @@ where
         derived_state: String::from("working"),
         error: None,
     };
-    store
-        .create_agent(&manifest)
-        .map_err(|e| e.to_string())?;
+    store.create_agent(&manifest).map_err(|e| e.to_string())?;
 
     let manifest_for_spawn = manifest.clone();
     let job = AgentJob {
@@ -3616,7 +3611,6 @@ fn current_git_branch() -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
-
 
 fn format_agent_terminal_output(
     status: &str,
@@ -4172,7 +4166,6 @@ fn canonical_tool_token(value: &str) -> String {
     }
     canonical
 }
-
 
 fn make_agent_id() -> String {
     let nanos = std::time::SystemTime::now()

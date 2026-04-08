@@ -94,10 +94,7 @@ impl FileConfigStore {
         vec![
             (ConfigSource::User, user_legacy_path),
             (ConfigSource::User, self.config_home.join("settings.json")),
-            (
-                ConfigSource::Project,
-                self.cwd.join(".claw.json"),
-            ),
+            (ConfigSource::Project, self.cwd.join(".claw.json")),
             (
                 ConfigSource::Project,
                 self.cwd.join(".claw").join("settings.json"),
@@ -154,10 +151,7 @@ impl ConfigStore for FileConfigStore {
 // File I/O helpers
 // ---------------------------------------------------------------------------
 
-fn read_config_layer(
-    scope: ConfigSource,
-    path: &Path,
-) -> Result<Option<ConfigLayer>, ConfigError> {
+fn read_config_layer(scope: ConfigSource, path: &Path) -> Result<Option<ConfigLayer>, ConfigError> {
     let is_legacy = path
         .file_name()
         .and_then(|n| n.to_str())

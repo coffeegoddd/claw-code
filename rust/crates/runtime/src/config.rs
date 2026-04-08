@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::json::JsonValue;

@@ -25,20 +25,11 @@ impl DoltPromptCacheStore {
 }
 
 impl PromptCacheStore for DoltPromptCacheStore {
-    fn read_completion(
-        &self,
-        _session_id: &str,
-        _request_hash: &str,
-    ) -> Option<StoredCompletion> {
+    fn read_completion(&self, _session_id: &str, _request_hash: &str) -> Option<StoredCompletion> {
         None // Unimplemented: DoltPromptCacheStore::read_completion
     }
 
-    fn write_completion(
-        &self,
-        _session_id: &str,
-        _request_hash: &str,
-        _entry: &StoredCompletion,
-    ) {
+    fn write_completion(&self, _session_id: &str, _request_hash: &str, _entry: &StoredCompletion) {
         // Unimplemented: DoltPromptCacheStore::write_completion
     }
 
@@ -46,10 +37,7 @@ impl PromptCacheStore for DoltPromptCacheStore {
         // Unimplemented: DoltPromptCacheStore::delete_completion
     }
 
-    fn load_state(
-        &self,
-        _session_id: &str,
-    ) -> (PromptCacheStats, Option<TrackedPromptState>) {
+    fn load_state(&self, _session_id: &str) -> (PromptCacheStats, Option<TrackedPromptState>) {
         // Unimplemented: DoltPromptCacheStore::load_state
         (PromptCacheStats::default(), None)
     }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod dolt_plugin_registry_store;
 mod hooks;
 pub mod plugin_registry_store;

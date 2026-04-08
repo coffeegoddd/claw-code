@@ -12,7 +12,7 @@ use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRun
 use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
-use crate::session::{ContentBlock, ConversationMessage, Session, SessionPromptEntry};
+use crate::session::{ContentBlock, ConversationMessage, Session};
 use crate::session_backend::SessionBackend;
 use crate::usage::{TokenUsage, UsageTracker};
 
@@ -316,7 +316,10 @@ where
             backend
                 .append_message(
                     &self.session.session_id,
-                    self.session.messages.last().expect("user message was just pushed"),
+                    self.session
+                        .messages
+                        .last()
+                        .expect("user message was just pushed"),
                 )
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
         }
