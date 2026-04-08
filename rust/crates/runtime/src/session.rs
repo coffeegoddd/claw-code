@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,12 +71,10 @@ pub struct SessionPromptEntry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionPersistence {
-    path: PathBuf,
-}
-
 /// Persisted conversational state for the runtime and CLI session manager.
+///
+/// `Session` is an in-memory data model. All file/database I/O is handled by
+/// [`SessionBackend`](crate::session_backend::SessionBackend) implementations.
 ///
 /// `workspace_root` binds the session to the worktree it was created in. The
 /// global session store under `~/.local/share/opencode` is shared across every
@@ -85,7 +82,7 @@ struct SessionPersistence {
 /// lanes can race and report success while writes land in the wrong CWD. See
 /// ROADMAP.md item 41 (Phantom completions root cause) for the full
 /// background.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub version: u32,
     pub session_id: String,
@@ -96,24 +93,7 @@ pub struct Session {
     pub fork: Option<SessionFork>,
     pub workspace_root: Option<PathBuf>,
     pub prompt_history: Vec<SessionPromptEntry>,
-    persistence: Option<SessionPersistence>,
 }
-
-impl PartialEq for Session {
-    fn eq(&self, other: &Self) -> bool {
-        self.version == other.version
-            && self.session_id == other.session_id
-            && self.created_at_ms == other.created_at_ms
-            && self.updated_at_ms == other.updated_at_ms
-            && self.messages == other.messages
-            && self.compaction == other.compaction
-            && self.fork == other.fork
-            && self.workspace_root == other.workspace_root
-            && self.prompt_history == other.prompt_history
-    }
-}
-
-impl Eq for Session {}
 
 /// Errors raised while loading, parsing, or saving sessions.
 #[derive(Debug)]
@@ -161,14 +141,57 @@ impl Session {
             fork: None,
             workspace_root: None,
             prompt_history: Vec::new(),
-            persistence: None,
         }
     }
 
+    /// Convenience method: save a full JSONL snapshot to a file path.
+    ///
+    /// Prefer using a [`SessionBackend`](crate::session_backend::SessionBackend)
+    /// for production persistence. This method is retained for backward
+    /// compatibility and test convenience.
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
+        let path = path.as_ref();
+        let snapshot = self.render_jsonl_snapshot()?;
+        rotate_session_file_if_needed(path)?;
+        write_atomic(path, &snapshot)?;
+        cleanup_rotated_logs(path)?;
+        Ok(())
+    }
+
+    /// Convenience method: load a session from a JSONL or JSON file.
+    ///
+    /// Prefer using a [`SessionBackend`](crate::session_backend::SessionBackend)
+    /// for production persistence. This method is retained for backward
+    /// compatibility and test convenience.
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path)?;
+        match JsonValue::parse(&contents) {
+            Ok(value)
+                if value
+                    .as_object()
+                    .is_some_and(|object| object.contains_key("messages")) =>
+            {
+                Self::from_json(&value)
+            }
+            Err(_) | Ok(_) => Self::from_jsonl(&contents),
+        }
+    }
+
+    /// Deprecated: persistence is now handled by
+    /// [`SessionBackend`](crate::session_backend::SessionBackend).
+    /// This method is retained for backward compatibility and returns `self`
+    /// unchanged.
     #[must_use]
-    pub fn with_persistence_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.persistence = Some(SessionPersistence { path: path.into() });
+    pub fn with_persistence_path(self, _path: impl Into<PathBuf>) -> Self {
         self
+    }
+
+    /// Deprecated: persistence path is no longer tracked on Session.
+    /// Returns `None` always.
+    #[must_use]
+    pub fn persistence_path(&self) -> Option<&Path> {
+        None
     }
 
     /// Bind this session to the workspace root it was created in.
@@ -187,54 +210,13 @@ impl Session {
         self.workspace_root.as_deref()
     }
 
-    #[must_use]
-    pub fn persistence_path(&self) -> Option<&Path> {
-        self.persistence.as_ref().map(|value| value.path.as_path())
-    }
-
-    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
-        let path = path.as_ref();
-        let snapshot = self.render_jsonl_snapshot()?;
-        rotate_session_file_if_needed(path)?;
-        write_atomic(path, &snapshot)?;
-        cleanup_rotated_logs(path)?;
-        Ok(())
-    }
-
-    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, SessionError> {
-        let path = path.as_ref();
-        let contents = fs::read_to_string(path)?;
-        let session = match JsonValue::parse(&contents) {
-            Ok(value)
-                if value
-                    .as_object()
-                    .is_some_and(|object| object.contains_key("messages")) =>
-            {
-                Self::from_json(&value)?
-            }
-            Err(_) | Ok(_) => Self::from_jsonl(&contents)?,
-        };
-        Ok(session.with_persistence_path(path.to_path_buf()))
-    }
-
-    pub fn push_message(&mut self, message: ConversationMessage) -> Result<(), SessionError> {
+    pub fn push_message(&mut self, message: ConversationMessage) {
         self.touch();
         self.messages.push(message);
-        let persist_result = {
-            let message_ref = self.messages.last().ok_or_else(|| {
-                SessionError::Format("message was just pushed but missing".to_string())
-            })?;
-            self.append_persisted_message(message_ref)
-        };
-        if let Err(error) = persist_result {
-            self.messages.pop();
-            return Err(error);
-        }
-        Ok(())
     }
 
-    pub fn push_user_text(&mut self, text: impl Into<String>) -> Result<(), SessionError> {
-        self.push_message(ConversationMessage::user_text(text))
+    pub fn push_user_text(&mut self, text: impl Into<String>) {
+        self.push_message(ConversationMessage::user_text(text));
     }
 
     pub fn record_compaction(&mut self, summary: impl Into<String>, removed_message_count: usize) {
@@ -263,7 +245,6 @@ impl Session {
             }),
             workspace_root: self.workspace_root.clone(),
             prompt_history: self.prompt_history.clone(),
-            persistence: None,
         }
     }
 
@@ -381,11 +362,10 @@ impl Session {
             fork,
             workspace_root,
             prompt_history,
-            persistence: None,
         })
     }
 
-    fn from_jsonl(contents: &str) -> Result<Self, SessionError> {
+    pub(crate) fn from_jsonl(contents: &str) -> Result<Self, SessionError> {
         let mut version = SESSION_VERSION;
         let mut session_id = None;
         let mut created_at_ms = None;
@@ -475,26 +455,24 @@ impl Session {
             fork,
             workspace_root,
             prompt_history,
-            persistence: None,
         })
     }
 
     /// Record a user prompt with the current wall-clock timestamp.
     ///
-    /// The entry is appended to the in-memory history and, when a persistence
-    /// path is configured, incrementally written to the JSONL session file.
-    pub fn push_prompt_entry(&mut self, text: impl Into<String>) -> Result<(), SessionError> {
+    /// This is an in-memory operation. Persistence is handled by the
+    /// [`SessionBackend`](crate::session_backend::SessionBackend) via
+    /// `append_prompt_entry`.
+    pub fn push_prompt_entry(&mut self, text: impl Into<String>) {
         let timestamp_ms = current_time_millis();
         let entry = SessionPromptEntry {
             timestamp_ms,
             text: text.into(),
         };
         self.prompt_history.push(entry);
-        let entry_ref = self.prompt_history.last().expect("entry was just pushed");
-        self.append_persisted_prompt_entry(entry_ref)
     }
 
-    fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
+    pub(crate) fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
         let mut lines = vec![self.meta_record()?.render()];
         if let Some(compaction) = &self.compaction {
             lines.push(compaction.to_jsonl_record()?.render());
@@ -512,41 +490,6 @@ impl Session {
         let mut rendered = lines.join("\n");
         rendered.push('\n');
         Ok(rendered)
-    }
-
-    fn append_persisted_message(&self, message: &ConversationMessage) -> Result<(), SessionError> {
-        let Some(path) = self.persistence_path() else {
-            return Ok(());
-        };
-
-        let needs_bootstrap = !path.exists() || fs::metadata(path)?.len() == 0;
-        if needs_bootstrap {
-            self.save_to_path(path)?;
-            return Ok(());
-        }
-
-        let mut file = OpenOptions::new().append(true).open(path)?;
-        writeln!(file, "{}", message_record(message).render())?;
-        Ok(())
-    }
-
-    fn append_persisted_prompt_entry(
-        &self,
-        entry: &SessionPromptEntry,
-    ) -> Result<(), SessionError> {
-        let Some(path) = self.persistence_path() else {
-            return Ok(());
-        };
-
-        let needs_bootstrap = !path.exists() || fs::metadata(path)?.len() == 0;
-        if needs_bootstrap {
-            self.save_to_path(path)?;
-            return Ok(());
-        }
-
-        let mut file = OpenOptions::new().append(true).open(path)?;
-        writeln!(file, "{}", entry.to_jsonl_record().render())?;
-        Ok(())
     }
 
     fn meta_record(&self) -> Result<JsonValue, SessionError> {
@@ -892,7 +835,7 @@ impl SessionPromptEntry {
     }
 }
 
-fn message_record(message: &ConversationMessage) -> JsonValue {
+pub(crate) fn message_record(message: &ConversationMessage) -> JsonValue {
     let mut object = BTreeMap::new();
     object.insert("type".to_string(), JsonValue::String("message".to_string()));
     object.insert("message".to_string(), message.to_json());
@@ -1003,7 +946,7 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
     })
 }
 
-fn current_time_millis() -> u64 {
+pub(crate) fn current_time_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
@@ -1016,7 +959,7 @@ fn generate_session_id() -> String {
     format!("session-{millis}-{counter}")
 }
 
-fn write_atomic(path: &Path, contents: &str) -> Result<(), SessionError> {
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<(), SessionError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1038,7 +981,7 @@ fn temporary_path_for(path: &Path) -> PathBuf {
     ))
 }
 
-fn rotate_session_file_if_needed(path: &Path) -> Result<(), SessionError> {
+pub(crate) fn rotate_session_file_if_needed(path: &Path) -> Result<(), SessionError> {
     let Ok(metadata) = fs::metadata(path) else {
         return Ok(());
     };
@@ -1058,7 +1001,7 @@ fn rotated_log_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{stem}.rot-{}.jsonl", current_time_millis()))
 }
 
-fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
+pub(crate) fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -1111,34 +1054,28 @@ mod tests {
     #[test]
     fn persists_and_restores_session_jsonl() {
         let mut session = Session::new();
-        session
-            .push_user_text("hello")
-            .expect("user message should append");
-        session
-            .push_message(ConversationMessage::assistant_with_usage(
-                vec![
-                    ContentBlock::Text {
-                        text: "thinking".to_string(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "tool-1".to_string(),
-                        name: "bash".to_string(),
-                        input: "echo hi".to_string(),
-                    },
-                ],
-                Some(TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 4,
-                    cache_creation_input_tokens: 1,
-                    cache_read_input_tokens: 2,
-                }),
-            ))
-            .expect("assistant message should append");
-        session
-            .push_message(ConversationMessage::tool_result(
-                "tool-1", "bash", "hi", false,
-            ))
-            .expect("tool result should append");
+        session.push_user_text("hello");
+        session.push_message(ConversationMessage::assistant_with_usage(
+            vec![
+                ContentBlock::Text {
+                    text: "thinking".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "bash".to_string(),
+                    input: "echo hi".to_string(),
+                },
+            ],
+            Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_creation_input_tokens: 1,
+                cache_read_input_tokens: 2,
+            }),
+        ));
+        session.push_message(ConversationMessage::tool_result(
+            "tool-1", "bash", "hi", false,
+        ));
 
         let path = temp_session_path("jsonl");
         session.save_to_path(&path).expect("session should save");
@@ -1188,14 +1125,13 @@ mod tests {
         session
             .save_to_path(&path)
             .expect("initial save should succeed");
+        session.push_user_text("hi");
+        session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }]));
         session
-            .push_user_text("hi")
-            .expect("user append should succeed");
-        session
-            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "hello".to_string(),
-            }]))
-            .expect("assistant append should succeed");
+            .save_to_path(&path)
+            .expect("updated save should succeed");
 
         let restored = Session::load_from_path(&path).expect("session should replay from jsonl");
         fs::remove_file(&path).expect("temp file should be removable");
@@ -1208,9 +1144,7 @@ mod tests {
     fn persists_compaction_metadata() {
         let path = temp_session_path("compaction");
         let mut session = Session::new();
-        session
-            .push_user_text("before")
-            .expect("message should append");
+        session.push_user_text("before");
         session.record_compaction("summarized earlier work", 4);
         session.save_to_path(&path).expect("session should save");
 
@@ -1227,9 +1161,7 @@ mod tests {
     fn forks_sessions_with_branch_metadata_and_persists_it() {
         let path = temp_session_path("fork");
         let mut session = Session::new();
-        session
-            .push_user_text("before fork")
-            .expect("message should append");
+        session.push_user_text("before fork");
 
         let forked = session
             .fork(Some("investigation".to_string()))
@@ -1379,9 +1311,7 @@ mod tests {
         let path = temp_session_path("workspace-root");
         let workspace_root = PathBuf::from("/tmp/b4-phantom-diag");
         let mut session = Session::new().with_workspace_root(workspace_root.clone());
-        session
-            .push_user_text("write to the right cwd")
-            .expect("user message should append");
+        session.push_user_text("write to the right cwd");
 
         // when
         session

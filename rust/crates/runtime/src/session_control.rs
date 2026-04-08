@@ -5,7 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::session::{Session, SessionError};
+use crate::session::{
+    ConversationMessage, Session, SessionCompaction, SessionError, SessionPromptEntry,
+};
+use crate::session_backend::{SessionBackend, SessionBackendError};
 
 /// Per-worktree session store that namespaces on-disk session files by
 /// workspace fingerprint so that parallel `opencode serve` instances never
@@ -239,6 +242,120 @@ impl SessionStore {
     }
 }
 
+impl SessionBackend for SessionStore {
+    fn create_session(&self, session: &Session) -> Result<(), SessionBackendError> {
+        let handle = self.create_handle(&session.session_id);
+        let snapshot = session.render_jsonl_snapshot()?;
+        crate::session::write_atomic(&handle.path, &snapshot)?;
+        Ok(())
+    }
+
+    fn load_session(&self, session_id: &str) -> Result<Session, SessionBackendError> {
+        let path = self.resolve_managed_path(session_id)?;
+        let contents = fs::read_to_string(&path)?;
+        let session = match crate::json::JsonValue::parse(&contents) {
+            Ok(value)
+                if value
+                    .as_object()
+                    .is_some_and(|object| object.contains_key("messages")) =>
+            {
+                Session::from_json(&value)?
+            }
+            Err(_) | Ok(_) => Session::from_jsonl(&contents)?,
+        };
+        Ok(session)
+    }
+
+    fn append_message(
+        &self,
+        session_id: &str,
+        message: &ConversationMessage,
+    ) -> Result<(), SessionBackendError> {
+        use std::io::Write as _;
+        let path = self.resolve_managed_path(session_id)?;
+        let record = crate::session::message_record(message);
+        let mut file = fs::OpenOptions::new().append(true).open(&path)?;
+        writeln!(file, "{}", record.render())?;
+        Ok(())
+    }
+
+    fn append_prompt_entry(
+        &self,
+        session_id: &str,
+        entry: &SessionPromptEntry,
+    ) -> Result<(), SessionBackendError> {
+        use std::io::Write as _;
+        let path = self.resolve_managed_path(session_id)?;
+        let record = entry.to_jsonl_record();
+        let mut file = fs::OpenOptions::new().append(true).open(&path)?;
+        writeln!(file, "{}", record.render())?;
+        Ok(())
+    }
+
+    fn save_snapshot(&self, session: &Session) -> Result<(), SessionBackendError> {
+        let handle = self.create_handle(&session.session_id);
+        let snapshot = session.render_jsonl_snapshot()?;
+        crate::session::rotate_session_file_if_needed(&handle.path)?;
+        crate::session::write_atomic(&handle.path, &snapshot)?;
+        crate::session::cleanup_rotated_logs(&handle.path)?;
+        Ok(())
+    }
+
+    fn update_compaction(
+        &self,
+        session_id: &str,
+        compaction: &SessionCompaction,
+        _remove_messages_before_ordinal: Option<u32>,
+    ) -> Result<(), SessionBackendError> {
+        let mut session = SessionBackend::load_session(self, session_id)?;
+        session.record_compaction(&compaction.summary, compaction.removed_message_count);
+        SessionBackend::save_snapshot(self, &session)?;
+        Ok(())
+    }
+
+    fn fork_session(
+        &self,
+        source_id: &str,
+        _new_session_id: &str,
+        branch_name: Option<&str>,
+    ) -> Result<Session, SessionBackendError> {
+        let source = SessionBackend::load_session(self, source_id)?;
+        let forked = source.fork(branch_name.map(ToOwned::to_owned));
+        SessionBackend::create_session(self, &forked)?;
+        Ok(forked)
+    }
+
+    fn list_sessions(&self) -> Result<Vec<ManagedSessionSummary>, SessionBackendError> {
+        Ok(SessionStore::list_sessions(self)?)
+    }
+
+    fn resolve_reference(&self, reference: &str) -> Result<String, SessionBackendError> {
+        let handle = SessionStore::resolve_reference(self, reference)?;
+        Ok(handle.id)
+    }
+
+    fn session_exists(&self, session_id: &str) -> Result<bool, SessionBackendError> {
+        Ok(self.resolve_managed_path(session_id).is_ok())
+    }
+
+    fn delete_session(&self, session_id: &str) -> Result<(), SessionBackendError> {
+        let path = self.resolve_managed_path(session_id)?;
+        fs::remove_file(&path)?;
+        Ok(())
+    }
+
+    fn storage_location(&self) -> String {
+        self.sessions_root.display().to_string()
+    }
+
+    fn session_path(&self, session_id: &str) -> Option<PathBuf> {
+        Some(
+            self.sessions_root
+                .join(format!("{session_id}.{PRIMARY_SESSION_EXTENSION}")),
+        )
+    }
+}
+
 /// Stable hex fingerprint of a workspace path.
 ///
 /// Uses FNV-1a (64-bit) to produce a 16-char hex string that partitions the
@@ -312,6 +429,16 @@ impl std::error::Error for SessionControlError {}
 impl From<std::io::Error> for SessionControlError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<SessionControlError> for SessionBackendError {
+    fn from(value: SessionControlError) -> Self {
+        match value {
+            SessionControlError::Io(inner) => Self::Io(inner),
+            SessionControlError::Session(inner) => Self::Session(inner),
+            SessionControlError::Format(msg) => Self::Format(msg),
+        }
     }
 }
 
@@ -597,12 +724,9 @@ mod tests {
 
     fn persist_session(root: &Path, text: &str) -> Session {
         let mut session = Session::new();
-        session
-            .push_user_text(text)
-            .expect("session message should save");
+        session.push_user_text(text);
         let handle = create_managed_session_handle_for(root, &session.session_id)
             .expect("managed session handle should build");
-        let session = session.with_persistence_path(handle.path.clone());
         session
             .save_to_path(&handle.path)
             .expect("session should persist");
@@ -697,10 +821,6 @@ mod tests {
             Some(source.session_id.as_str())
         );
         assert_eq!(summary.branch_name.as_deref(), Some("incident-review"));
-        assert_eq!(
-            forked.session.persistence_path(),
-            Some(forked.handle.path.as_path())
-        );
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
@@ -710,11 +830,8 @@ mod tests {
 
     fn persist_session_via_store(store: &SessionStore, text: &str) -> Session {
         let mut session = Session::new();
-        session
-            .push_user_text(text)
-            .expect("session message should save");
+        session.push_user_text(text);
         let handle = store.create_handle(&session.session_id);
-        let session = session.with_persistence_path(handle.path.clone());
         session
             .save_to_path(&handle.path)
             .expect("session should persist");
